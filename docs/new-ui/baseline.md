@@ -98,13 +98,15 @@ Note: a fresh configure fetches the RNNoise noise-reduction model via CMake
 `FetchContent` into `build/_deps/`, so the first configure needs internet
 access once.
 
-Build status: **not executed** — deferred by operator decision, because only
-~4 GiB of 15 GiB RAM were available at preparation time (swap already ~50%
-used; a 16-way parallel build would exhaust memory). The commands above are
-the recorded build procedure; if memory is still tight, cap the jobs
-explicitly (e.g. `cmake --build build -j4`). Whether the tree compiles
-warning-free with GCC 16 (`warnings-as-errors=ON`) and Qt 6.12 is unverified
-until the first build runs (see section 7).
+Build status: **executed successfully for the client**. The build was started
+with `-j1` under the low-memory constraint and resumed with
+`cmake --build build -j4` once more memory was available (ninja resumes
+incrementally). Final state: client binary `build/mumble`, all position-audio
+plugins, and 16 of 17 test executables built and linked. The single failure is
+the `TestMumbleProtocol` compile described in section 7; `ninja -C build -j4
+-k 0` was used to complete all other targets despite it. Runtime sanity
+check: `./build/mumble --version` prints `1.6.0`, `./build/mumble --help`
+renders the CLI11 help output.
 
 ## 5. Test baseline
 
@@ -134,7 +136,10 @@ MySQL/PostgreSQL database test variants (`-Ddatabase-mysql-tests=ON`,
 
 To run only client-related tests: `ctest --test-dir build -R "TestXMLTools|TestSettingsJSONSerialization"`.
 
-Results: **not executed** (build deferred, see section 4).
+Results: **16 of 17 suites passed** (`ctest --output-on-failure --test-dir
+build`, total runtime ~5 s). `TestMumbleProtocol` was **not run** — its
+executable could not be built (see section 7); ctest counts that as a failure
+in its summary ("94% tests passed, 1 tests failed out of 17").
 
 ## 6. Protecting the original Mumble configuration
 
@@ -167,16 +172,20 @@ architecture investigation.
 
 ## 7. Known environmental limitations and build blockers
 
-- RAM: at preparation time only ~4 GiB of 15 GiB were available, so the build
-  was deferred by operator decision. The configure step was still verified
-  (negligible memory use). Before the first build, either free memory or cap
-  jobs (e.g. `cmake --build build -j4`).
+- **Build blocker (test suite only): `TestMumbleProtocol` fails to compile.**
+  The system protobuf (36.1) marks `SerializeWithCachedSizesToArray()` and
+  `ParseFromArray()` as `[[nodiscard]]` (`PROTOBUF_FUTURE_ADD_EARLY_NODISCARD`
+  in `google/protobuf/message_lite.h`), while
+  `src/tests/TestMumbleProtocol.cpp:283` and `:309` ignore those return
+  values. With GCC 16 and `warnings-as-errors=ON` this is a hard
+  `-Werror=unused-result` error. The client itself and all other test suites
+  compile and link **warning-free** under GCC 16.2.1 / Qt 6.12.0. Fix for
+  separate handling: use or explicitly discard the return values in the test.
+- RAM: the build was started with `-j1` because only ~4 GiB of 15 GiB were
+  available; it was resumed with `-j4` once ~5 GiB were free and completed
+  without memory problems.
 - Fresh configure requires network access once (RNNoise model download,
   section 4).
-- Bleeding-edge toolchain: GCC 16.2.1 (with `warnings-as-errors=ON`,
-  i.e. `-Werror -Wall -Wpedantic -Wextra -Wconversion -Wsign-conversion`) and
-  Qt 6.12.0 are newer than what the `1.6.x` branch is routinely validated
-  against; the first build may surface new compiler diagnostics.
 - OSS audio backend is not enabled (no `USE_OSS` definition); irrelevant here
   since PulseAudio/PipeWire are in use.
 - Online tests and MySQL/PostgreSQL database tests are excluded (no
