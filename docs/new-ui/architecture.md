@@ -22,7 +22,9 @@ renderer, new protocol, or audio/network rewrite.
 Required decisions:
 
 1. Isolate fork window geometry, layout, minimal mode, and restoration recovery
-   in a per-profile sidecar. Never temporarily put fork values into shared
+   in a per-profile sidecar when integrating the new shell. Build and test the
+   store independently first, retaining official window persistence until the
+   atomic shell/persistence transition. Never put fork values into shared
    `Settings`: startup restoration, configuration acceptance, session shutdown,
    and normal shutdown can all save it.
 2. Keep one authoritative tree selection. Improve its delegate and surrounding
@@ -363,6 +365,12 @@ fully exited; crashes and failed writes still need tests and visible errors.
 
 ### 5.3 Protect the official window preferences at every save point
 
+These rules take effect with the new shell in Stage 2. Stage 1 implements and
+tests `UiStateStore` independently; the running legacy shell keeps its existing
+official persistence behavior. Do not migrate legacy dock state into the
+sidecar. Activate all persistence routing and protected-settings handling in
+the same atomic commit that integrates the new shell, with compatibility tests.
+
 **Do not call the old `loadState()` body for the new shell.** It clears the
 chosen geometry/state, sets `preventWindowStates=true`, saves shared JSON,
 attempts restore, then stores the current layout and saves again. Ignoring the
@@ -476,7 +484,7 @@ visible diagnostic, never a fallback write into shared settings.
 
 ### 5.5 Shutdown, restart, and two installed executables
 
-Normal sequence:
+Normal sequence after the atomic shell/persistence transition:
 
 1. Official client exits fully; its settings/database become authoritative.
 2. Fork discovers the same profile, loads shared settings/database normally,
@@ -521,16 +529,14 @@ not add a second legacy-import implementation. `Global::migrateDataDir()` can
 move old files before load, so test that path with disposable directories,
 especially when alternating Qt generations or installation types.
 
-**Correction to baseline.md §6's example:** explicit `--config` here calls the
-JSON loader, not `legacyLoad()`, and `save(path)` requires a `.json` suffix.
-An INI file passed directly is not a valid isolation recipe. Use an existing
-valid test JSON with `settings_version: 1` and
-`misc.database_location` pointing at a disposable SQLite file. Prepare it with
-the existing serializer/fixture; isolate HOME/XDG/AppData, certificate and data
-paths as appropriate, and do not run against the developer's profile. A
-separate session bus/runtime directory may be needed to avoid contacting an
-already running client. No tests in this research launched a client or opened
-the user's database.
+Use the reproducible JSON profile in [baseline.md §6](baseline.md#6-protecting-the-original-mumble-configuration).
+Explicit `--config` here calls the JSON loader, not `legacyLoad()`, and
+`save(path)` requires a `.json` suffix. The recipe creates a separate SQLite
+file and isolates application data, configuration, cache, temporary-file and
+certificate paths. Keep both clients closed between launches; use disposable
+OS profiles/IPC namespaces for failure and restart tests that can reach legacy
+fallback paths. No tests in this research launched a client or opened the
+user's database.
 
 ### 5.7 Version compatibility is bounded, not assumed
 
@@ -577,46 +583,63 @@ editing MainWindow/Log/ConfigDialog concurrently; hand off at reviewed commits.
 
 ### Stage 1 — foundation and compatibility (release-blocking)
 
-- **Scope/files:** `Settings`, `JSONSerialization`, `Global`, `main.cpp`,
-  MainWindow state methods, `LookConfig`, `ConfigDialog`, `MumbleApplication`,
-  overlay callers. New `UiStateStore.{h,cpp}` and focused Qt test targets.
-- **Refactorings:** add the sidecar helper; route all layout/minimal-state
-  access away from shared Settings, including the protected-field Apply guard;
-  fix explicit-profile restart separately. Initially retain the current visual
-  layout, saving any temporary dock state only in the sidecar with its own
-  layout revision; invalidate that temporary field when the new shell arrives.
-- **Dependencies:** this document's review and selected compatibility pair.
-  No layout work depends on unresolved 1.5 claims.
-- **Risks:** early shared writes, dialog-copy normalization, recovery loops,
-  path mismatch, restart changing profile.
-- **Acceptance/tests:** pure layout actions, startup, toggles, Apply/OK/reset,
-  session shutdown, overlay round-trip, restart, and injected restoration crash
-  preserve every protected field. Genuine audio/bookmark edits remain shared.
-  Use §7 alternating-profile fixtures before real-profile testing.
+- **Scope/files:** new `UiStateStore.{h,cpp}` and focused Qt test targets;
+  `main.cpp` for explicit-profile restart continuity. Inspect `Settings`,
+  `JSONSerialization`, and `Global` for profile-resolution test fixtures.
+- **Refactorings:** implement and test the sidecar helper independently, with
+  explicit paths and value structs, without connecting it to the running UI.
+  Keep official `MainWindow::loadState()/storeState()` behavior and existing
+  settings handling until Stage 2. Do not add temporary legacy dock fields or
+  migrate legacy layouts to the sidecar. Fix explicit-profile restart separately.
+- **Dependencies:** this document's review and selected official 1.6.x/fork
+  compatibility pair. No layout work depends on unresolved 1.5 claims.
+- **Risks:** invalid sidecar data, recovery loops, path mismatch, restart
+  changing profile, accidentally activating fork persistence too early.
+- **Acceptance/tests:** isolated `TestUiStateStore` covers parsing, defaults,
+  validation, atomic writes and recovery transitions with temporary files.
+  Profile/restart fixtures verify JSON, DB and certificate path continuity.
+  The legacy UI still restores/saves official window state; normal application
+  runs do not create/use a sidecar yet. Prepare §7 compatibility fixtures for
+  Stage 2, which activates the protected-field invariants.
 - **Atomic commits:** (1) sidecar parser/writer plus isolated tests;
-  (2) complete persistence routing/protected-field integration plus tests;
-  (3) explicit-profile restart fix plus argument tests. Do not mix unrelated
+  (2) explicit-profile restart fix plus argument tests. Do not mix unrelated
   upstream fixes into these commits.
 
 ### Stage 2 — main shell
 
 - **Scope/files:** MainWindow setup/view/popup/focus methods, `.ui`,
-  `CustomElements`, `Log`; new `MainWindowShell`, `ConnectionHeader`, `ChatPanel`.
+  `CustomElements`, `Log`, `UiStateStore`, `LookConfig`, `ConfigDialog`,
+  `MumbleApplication`, and overlay callers; new `MainWindowShell`,
+  `ConnectionHeader`, `ChatPanel`.
 - **Refactorings:** first introduce the console-visibility query while the old
   dock still exists. Then take/reparent the existing tree and chat widgets into
   native splitter/layout containers. Keep combined log output initially. Adapt
   minimal view, menu actions, title bars, and destructor consistently. Keep the
   old toolbar controls accessible until Stage 4 replaces their placement.
-- **Dependencies:** Stage 1; new shell layout revision.
+  In that same shell integration change, activate fork-specific persistence
+  and **all** §5.3 protected-settings handling: runtime minimal/frame reads,
+  startup/close/session/overlay routing, LookConfig save suppression, and the
+  ConfigDialog protected-field guard. Use the new shell's sidecar format
+  directly; never pass its state through official persistence.
+- **Dependencies:** tested Stage 1 store and profile continuity; initial shell
+  layout revision and compatibility fixtures ready before integration.
 - **Risks:** deleted central widget, dangling dock filters, invisible actions,
-  stale state version, `show()/setWindowFlags()` platform effects.
+  early shared writes, dialog-copy normalization, stale state version,
+  `show()/setWindowFlags()` platform effects.
 - **Acceptance/tests:** connect/settings/search are reachable; exact model and
   selection objects survive; resize, narrow window, minimal/normal transitions,
-  tray reopen, and repeated construction/destruction work. Protected settings
-  tests remain green; Qt offscreen shell fixture checks parentage/focus/visibility.
-- **Atomic commits:** (1) visibility query refactor; (2) shell and necessary
-  ownership/minimal-view integration; (3) connection header presentation. New
-  file creation and its build registration belong in the same commit.
+  tray reopen, and repeated construction/destruction work. At every shared
+  save, startup/toggles/Apply/OK/reset/session shutdown/overlay round-trip and
+  injected restoration crashes preserve all nine protected fields; intentional
+  audio/bookmark edits remain shared. Pass §7.2 compatibility fixtures and §7.3
+  official 1.6.x/fork alternation at the transition commit. Qt offscreen shell
+  fixtures check parentage/focus/visibility.
+- **Atomic commits:** (1) visibility query refactor with legacy behavior;
+  (2) shell ownership/minimal-view integration **plus complete fork persistence,
+  protected-settings handling and compatibility tests as one atomic change**;
+  (3) connection header presentation. Do not split commit 2 into an intermediate
+  shell using shared layout persistence or an intermediate legacy sidecar
+  migration. New file creation and its build registration belong together.
 
 ### Stage 3 — channel/user navigation
 
@@ -747,8 +770,8 @@ for isolated fixtures; native input/accessibility still needs desktop testing.
 
 | Proposed fixture | Concrete assertions |
 | --- | --- |
-| `TestUiStateStore` | Temp-only paths; missing file defaults; round trip; two profiles in one directory; backup-normalized/symlink paths; invalid JSON/types/base64/size bounds; unsupported version preserved; failed atomic writes; pre-restore latch and failed/crashed restore recovery. |
-| `TestUiConfigurationCompatibility` | Seed official geometry/state with distinguishable bytes and nondefault layout/minimal/lock/latch values. Run fork capture/restore/toggles, config Apply/OK/reset and session save in an isolated harness. Inspect shared JSON **at each save**; protected fields unchanged, intentional audio/transmit/hotkey edits retained, no fork keys. Compare schema version/default interpretation. Include a test certificate and compare fingerprint/key identity rather than exported container bytes. |
+| `TestUiStateStore` | Stage 1, independent of MainWindow: temp-only paths; missing file defaults; round trip; two profiles in one directory; backup-normalized/symlink paths; invalid JSON/types/base64/size bounds; unsupported version preserved; failed atomic writes; simulated pre-restore latch and failed/crashed restore recovery. |
+| `TestUiConfigurationCompatibility` | Required in the atomic Stage 2 integration commit. Seed official geometry/state with distinguishable bytes and nondefault layout/minimal/lock/latch values. Run fork capture/restore/toggles, config Apply/OK/reset and session save in an isolated harness. Inspect shared JSON **at each save**; protected fields unchanged, intentional audio/transmit/hotkey edits retained, no fork keys. Compare schema version/default interpretation. Include a test certificate and compare fingerprint/key identity rather than exported container bytes. |
 | Profile/restart process test | Launch/restart fixture with explicit path containing spaces/non-ASCII and a different default profile sentinel. Assert both generations resolve the same JSON, sidecar, DB and certificate location, and invoke the fork executable. Inject process exit after guard save without executing deliberately corrupt Qt blobs. |
 | `TestMainWindowShell` | Inject real widgets/actions into shell without audio startup or server; check same object identities, parents, minimum sizes, focus order, hidden-pane behavior, normal/minimal transitions, destruction after queued events. Use `QPointer` destruction observations. |
 | `TestUserNavigation` | Synthetic channels/users/listeners, roles/accessibility, selection preservation during moves/removal, icon hit regions, RTL/font scaling. Existing model globals need a minimal isolated Global/DB fixture, or use a tiny fake model for delegate-only tests; never start the full application to test painting. |
@@ -832,7 +855,7 @@ gate, U = ordinary UI/parity work.
 
 | Priority/type | Risk | Likelihood | Impact | Mitigation / proving test |
 | --- | --- | --- | --- | --- |
-| P0 / A | Shared layout overwritten by restore, Apply or shutdown | High | Official UI damaged, crash latch changed | Stage 1; protected fields inspected at every save; alternating-client test. |
+| P0 / A | Shared layout overwritten by restore, Apply or shutdown | High | Official UI damaged, crash latch changed | Atomic Stage 2 shell/persistence transition; protected fields inspected at every save; alternating-client test. |
 | P0 / A | Wrong profile/database after discovery or restart | High | Apparent settings/identity loss or writes to unintended profile | Keep identity; verify actual paths; preserve explicit restart arguments; portable/package tests. |
 | P0 / A | Unsupported 1.5/1.6 shared values | High for mixed versions | Older client fails load or discards settings | Explicit support matrix; block blanket 1.5 claims; resolve non-UI compatibility separately. |
 | P0 / A | Chat split bypasses validation or changes targets | Medium | Untrusted content handling or private message misdelivery | Reuse validation/sending; shared target resolver; HTML and destination fixtures. |

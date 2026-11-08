@@ -150,25 +150,101 @@ against the user's normal profile was performed.
 Relevant CLI options (`src/mumble/main.cpp`, CLI11-based parser):
 
 - `-c,--config <config>` (main.cpp:265): use an alternative configuration
-  file. The option requires an **existing file** (`CLI::ExistingFile`). The
-  help text explicitly warns that when running multiple instances, an
-  alternative `database` value must also be set in that config — i.e.
-  `--config` alone does **not** relocate the SQLite database.
+  file. It must be an **existing, writable JSON file**, with a `.json` suffix
+  for saving (`main.cpp:422,664`; `Settings.cpp:144,220`). Explicit `--config`
+  does not invoke the legacy INI importer. The JSON database setting is
+  `misc.database_location`; `--config` alone does **not** guarantee a separate
+  SQLite database.
 - `--default-certificate-dir <dir>` (main.cpp:273): alternative default
   certificate path, only used when no certificate is loaded from settings.
 - `-m,--multiple` (main.cpp:281): allow multiple instances.
 
-Recommended isolated runtime check for development builds (keeps the normal
-profile untouched):
+For a native Linux development build, run the following from the repository
+root in Bash (requires Python 3 with its standard-library `sqlite3` module).
+Fully quit all Mumble clients first, including tray-resident processes, and
+keep them closed during this check. Do not use `--multiple`: this recipe tests
+one process at a time and avoids forwarding startup to an existing client.
+
+The fresh JSON uses defaults for omitted settings. Pre-creating a writable
+SQLite file avoids the missing-database prompt and accidental selection of
+"Reset Configured Path", which would re-enable database discovery.
 
 ```bash
-mkdir -p /tmp/mumble-newui-profile
-# create an INI config there; set database=<path inside that dir>
-./build/mumble -c /tmp/mumble-newui-profile/mumble.ini -m
+umask 077
+mumble_test_binary="$(pwd)/build/mumble"
+mumble_test_root=$(mktemp -d /tmp/mumble-new-ui.XXXXXXXX) || exit 1
+mkdir -p "$mumble_test_root"/{profile,config,data,cache,state,tmp,certificates} || exit 1
+
+python3 - "$mumble_test_root" <<'PY' || exit 1
+import json
+import sqlite3
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+database = root / "profile" / "mumble.sqlite"
+with sqlite3.connect(database) as connection:
+    connection.execute("PRAGMA user_version = 0")
+    assert connection.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+connection.close()
+settings = {
+    "settings_version": 1,
+    "mumble_has_quit_normally": True,
+    "misc": {"database_location": str(database)},
+}
+(root / "profile" / "mumble_settings.json").write_text(
+    json.dumps(settings, indent=4) + "\n", encoding="utf-8"
+)
+PY
+
+# Reuse this function and root for subsequent launches in this shell.
+run_mumble_test() (
+    cd "$mumble_test_root/profile" || exit 1
+    env XDG_CONFIG_HOME="$mumble_test_root/config" \
+        XDG_DATA_HOME="$mumble_test_root/data" \
+        XDG_CACHE_HOME="$mumble_test_root/cache" \
+        XDG_STATE_HOME="$mumble_test_root/state" \
+        TMPDIR="$mumble_test_root/tmp" \
+        "$1" --config "$mumble_test_root/profile/mumble_settings.json" \
+        --default-certificate-dir "$mumble_test_root/certificates"
+)
+
+printf 'Disposable test profile: %s\n' "$mumble_test_root"
+run_mumble_test "$mumble_test_binary"
 ```
 
-Actual shared-configuration compatibility changes will be designed after the
-architecture investigation.
+`Global` uses the explicit config's directory for Plugins/Overlay/Themes and
+skips legacy data migration on this path (`Global.cpp:144–167`). The XDG
+overrides also isolate Qt's application configuration/data/cache paths;
+`TMPDIR` isolates the fixed `mumble_settings.json.tmp` used by the shared saver.
+The certificate directory keeps automatic certificate backups in the test
+profile. Desktop/session variables remain inherited for native GUI/audio use.
+
+Quit through the application's Quit action and wait for the process to exit.
+After each run, check that JSON still points to the exact test SQLite path,
+that the expected database contains the client tables and passes
+`PRAGMA integrity_check`, and that generated profile files stay beneath the
+printed directory. Treat any database-open error or fallback path as a failed
+test; do not continue with another database. Retain this directory for review
+or remove only this generated directory after all test processes have exited.
+
+**Restart limitation:** the inspected `main.cpp:1020–1054` drops `--config`
+and `--default-certificate-dir` on automatic restart. Until the foundation fix
+is implemented, decline automatic restarts; quit and call `run_mumble_test`
+again manually. This recipe isolates a normal native Linux launch, not every
+failure path: database fallback can search the real home/executable directory.
+Use a disposable OS account or VM for fallback, legacy migration and automatic
+restart tests, and for Windows/macOS or sandboxed-package path certification.
+
+The initial compatibility target is **official 1.6.x versus the 1.6.x-based
+fork**. For alternation, reuse this same generated JSON, SQLite file and launch
+function, supplying each executable's absolute path in turn after full exit;
+do not recreate the fixture between clients. Separate independent test profiles
+must each have their own SQLite file and data directories. Follow
+[architecture.md §7.3](architecture.md#73-alternating-client-release-test) for
+the assertions. The documented [1.5.x limitations](architecture.md#57-version-compatibility-is-bounded-not-assumed)
+remain unresolved; this recipe does not certify cross-version losslessness.
+No runtime launch was performed as part of this documentation correction.
 
 ## 7. Known environmental limitations and build blockers
 
