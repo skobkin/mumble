@@ -13,6 +13,7 @@
 #include <QJsonObject>
 #include <QJsonParseError>
 #include <QSaveFile>
+#include <QStringList>
 #include <QtEndian>
 
 #include <cmath>
@@ -257,7 +258,9 @@ ExistingVerdict readExisting(const QString &path, ParsedSidecar *out, QString *e
 			QList< int > parsedSizes;
 			for (const QJsonValue &element : sizes) {
 				int size = 0;
-				if (!jsonInt(element, &size) || size < 1 || size > UiStateStore::MaxSplitterSize) {
+				// Zero is valid (a collapsed pane); negative and oversized
+				// values are corruption.
+				if (!jsonInt(element, &size) || size < 0 || size > UiStateStore::MaxSplitterSize) {
 					assignError(errorString,
 								QStringLiteral("invalid splitter size in '%1'").arg(path));
 					return ExistingVerdict::InvalidContent;
@@ -341,9 +344,14 @@ QString UiStateStore::sidecarPathFor(const QString &primarySettingsPath) {
 	// final file component: the shared settings saver replaces its target via
 	// rename(), which would break through a symlinked settings file and
 	// silently move the effective sidecar location between runs. Directories
-	// survive renames of the files they contain.
+	// survive renames of the files they contain. Directory components below
+	// that ancestor do not exist yet (the primary file itself may not either)
+	// and are collected on the way up, then reattached unchanged below the
+	// canonical prefix - dropping them would collapse distinct profiles with
+	// identical file names into one sidecar.
 	const QString fileName = QFileInfo(path).fileName();
 	QString dir            = QFileInfo(path).absolutePath();
+	QStringList missingComponents;
 	for (;;) {
 		const QFileInfo dirInfo(dir);
 		if (dirInfo.isDir()) {
@@ -357,7 +365,11 @@ QString UiStateStore::sidecarPathFor(const QString &primarySettingsPath) {
 		if (parent == dir) {
 			break; // reached the filesystem root without a resolvable directory
 		}
+		missingComponents.prepend(QFileInfo(dir).fileName());
 		dir = parent;
+	}
+	for (const QString &component : missingComponents) {
+		dir = QDir(dir).filePath(component);
 	}
 	return QDir(dir).filePath(fileName + QStringLiteral(".new-ui.json"));
 }
@@ -442,7 +454,8 @@ QString UiStateStore::validateValues(const UiState &state) {
 		return QStringLiteral("implausible splitter count %1").arg(count);
 	}
 	for (int size : state.normalSplitterSizes) {
-		if (size < 1 || size > MaxSplitterSize) {
+		// Zero is valid (a collapsed pane); negative values are not.
+		if (size < 0 || size > MaxSplitterSize) {
 			return QStringLiteral("invalid splitter size %1").arg(size);
 		}
 	}
@@ -453,21 +466,22 @@ UiStateStore::SaveResult UiStateStore::save(const UiState &state, QString *error
 											bool clearRestoreBlock) {
 	if (clearRestoreBlock) {
 		// Explicit "reset fork layout": release the latch and clear any
-		// potentially unsafe geometry in the same write. A reset also cancels
-		// an active restoration.
-		m_restoreInProgress = false;
-		const SaveResult result = writeValidated(state, false, false, errorString);
+		// potentially unsafe geometry in the same write. A successful reset
+		// also cancels an active restoration; a failed one leaves the
+		// restoration protocol intact.
+		const SaveResult result = writeValidated(state, false, false, true, errorString);
 		if (result == SaveResult::Saved) {
-			m_restoreBlocked = false;
+			m_restoreBlocked    = false;
+			m_restoreInProgress = false;
 		}
 		return result;
 	}
 	if (m_restoreBlocked) {
 		// Sticky latch: geometry can never persist through an ordinary save
 		// while restoration is blocked.
-		return writeValidated(state, true, false, errorString);
+		return writeValidated(state, true, false, true, errorString);
 	}
-	return writeValidated(state, false, true, errorString);
+	return writeValidated(state, false, true, false, errorString);
 }
 
 bool UiStateStore::beginGeometryRestore(const UiState &candidate, QString *errorString) {
@@ -479,7 +493,26 @@ bool UiStateStore::beginGeometryRestore(const UiState &candidate, QString *error
 		qWarning("UiStateStore: %s", qUtf8Printable(message));
 		return false;
 	}
-	if (writeValidated(candidate, true, false, errorString) != SaveResult::Saved) {
+	// The on-disk latch is authoritative even when load() was never called:
+	// a latched sidecar means a previous restoration was interrupted, and
+	// only an explicit reset (or a completed guarded restoration) may start
+	// geometry handling again. Without this check, every new process could
+	// re-arm a crashed restoration - the loop the latch exists to prevent.
+	{
+		ParsedSidecar existing;
+		QString readError;
+		if (readExisting(m_sidecarPath, &existing, &readError) == ExistingVerdict::Ok
+			&& existing.restoreBlocked) {
+			m_restoreBlocked = true;
+			const QString message = QStringLiteral(
+				"the existing sidecar carries the restore latch; an explicit layout reset (save "
+				"with clearRestoreBlock) is required before restoring geometry again");
+			assignError(errorString, message);
+			qWarning("UiStateStore: %s", qUtf8Printable(message));
+			return false;
+		}
+	}
+	if (writeValidated(candidate, true, false, false, errorString) != SaveResult::Saved) {
 		return false;
 	}
 	m_restoreInProgress = true;
@@ -496,7 +529,7 @@ UiStateStore::SaveResult UiStateStore::finishGeometryRestore(const UiState &rest
 		qWarning("UiStateStore: %s", qUtf8Printable(message));
 		return SaveResult::InvalidOperation;
 	}
-	const SaveResult result = writeValidated(restored, false, true, errorString);
+	const SaveResult result = writeValidated(restored, false, true, true, errorString);
 	if (result == SaveResult::Saved) {
 		m_restoreInProgress = false;
 		m_restoreBlocked    = false;
@@ -506,7 +539,14 @@ UiStateStore::SaveResult UiStateStore::finishGeometryRestore(const UiState &rest
 
 UiStateStore::SaveResult UiStateStore::abortGeometryRestore(const UiState &current,
 															QString *errorString) {
-	const SaveResult result = writeValidated(current, false, false, errorString);
+	if (!m_restoreInProgress) {
+		const QString message =
+			QStringLiteral("abortGeometryRestore without a successful beginGeometryRestore");
+		assignError(errorString, message);
+		qWarning("UiStateStore: %s", qUtf8Printable(message));
+		return SaveResult::InvalidOperation;
+	}
+	const SaveResult result = writeValidated(current, false, false, true, errorString);
 	if (result == SaveResult::Saved) {
 		m_restoreInProgress = false;
 		m_restoreBlocked    = false;
@@ -576,7 +616,8 @@ bool UiStateStore::quarantineExisting(QString *errorString) {
 }
 
 UiStateStore::SaveResult UiStateStore::writeValidated(const UiState &values, bool writeRestoreBlocked,
-													  bool includeGeometry, QString *errorString) {
+													  bool includeGeometry, bool mayReleaseLatchedExisting,
+													  QString *errorString) {
 	if (m_sidecarPath.isEmpty()) {
 		const QString message = QStringLiteral("no sidecar path configured; cannot persist UI state");
 		assignError(errorString, message);
@@ -604,7 +645,8 @@ UiStateStore::SaveResult UiStateStore::writeValidated(const UiState &values, boo
 	// immediately before the write; there is no cross-process locking.
 	ParsedSidecar existing;
 	QString existingError;
-	switch (readExisting(m_sidecarPath, &existing, &existingError)) {
+	const ExistingVerdict verdict = readExisting(m_sidecarPath, &existing, &existingError);
+	switch (verdict) {
 		case ExistingVerdict::Absent:
 		case ExistingVerdict::Ok:
 			break;
@@ -625,6 +667,22 @@ UiStateStore::SaveResult UiStateStore::writeValidated(const UiState &values, boo
 							.arg(existingError));
 			qWarning("UiStateStore: %s", qUtf8Printable(existingError));
 			return SaveResult::RefusedInvalidExisting;
+	}
+
+	// The on-disk restore latch is authoritative for every write, whether or
+	// not load() was called: a latched sidecar must never gain geometry, and
+	// the latch may only be released by the explicit reset transition or a
+	// completed guarded restoration (mayReleaseLatchedExisting). Any other
+	// write that would persist geometry with a cleared latch is demoted to
+	// keep the latch and strip the geometry.
+	if (verdict == ExistingVerdict::Ok && existing.restoreBlocked && !writeRestoreBlocked
+		&& includeGeometry && !mayReleaseLatchedExisting) {
+		writeRestoreBlocked = true;
+		includeGeometry     = false;
+		m_restoreBlocked    = true;
+		qWarning("UiStateStore: existing sidecar '%s' is latched; keeping restoreBlocked and "
+				 "stripping geometry",
+				 qUtf8Printable(m_sidecarPath));
 	}
 
 	QSaveFile file(m_sidecarPath);

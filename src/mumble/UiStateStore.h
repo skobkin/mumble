@@ -26,7 +26,8 @@ struct UiState {
 	/// Opaque QWidget::saveGeometry() bytes. Empty means "not saved".
 	QByteArray normalGeometry;
 	QByteArray compactGeometry;
-	/// Explicit splitter sizes in pixels. Empty means "not saved".
+	/// Explicit splitter sizes in pixels. Zero is valid (a collapsed pane);
+	/// empty means "not saved".
 	QList< int > normalSplitterSizes;
 
 	// --- Metadata as loaded from the sidecar; ignored on save ---
@@ -79,7 +80,8 @@ public:
 	/// "not saved"; otherwise the element count must be within this window.
 	static constexpr qsizetype MinSplitterCount = 2;
 	static constexpr qsizetype MaxSplitterCount = 8;
-	/// Largest plausible splitter size in pixels.
+	/// Largest plausible splitter size in pixels. Zero is a valid size (a
+	/// collapsed pane); negative values are not.
 	static constexpr int MaxSplitterSize = 65535;
 
 	enum class LoadResult {
@@ -137,7 +139,8 @@ public:
 	/// write path (never resolved through a symlinked file, which the shared
 	/// saver would replace via rename) with one trailing ".back" backup
 	/// suffix stripped and ".new-ui.json" appended. Only the deepest existing
-	/// ancestor directory is canonicalized.
+	/// ancestor directory is canonicalized; non-existing intermediate
+	/// directories are preserved unchanged below it.
 	static QString sidecarPathFor(const QString &primarySettingsPath);
 
 	/// Sidecar path of this store; empty if constructed with an empty path.
@@ -154,14 +157,17 @@ public:
 
 	/// Persists layout values.
 	///
-	/// While the restore latch is set (a load found restoreBlocked=true, or a
-	/// beginGeometryRestore() guard is active) the latch is sticky: the write
-	/// keeps restoreBlocked=true and strips geometry, so unsafe bytes can
-	/// never persist through an ordinary save. With clearRestoreBlock the
+	/// While the restore latch is set (a load found restoreBlocked=true, a
+	/// beginGeometryRestore() guard is active, or the existing sidecar on
+	/// disk carries the latch) the latch is sticky: the write keeps
+	/// restoreBlocked=true and strips geometry, so unsafe bytes can never
+	/// persist through an ordinary save. The on-disk latch is enforced even
+	/// when load() was never called, so a fresh store instance cannot
+	/// overwrite a latched sidecar with geometry. With clearRestoreBlock the
 	/// latch is released and geometry is cleared in the same write - the
-	/// explicit "reset fork layout" transition; this also cancels an active
-	/// restoration. Only finishGeometryRestore() persists geometry together
-	/// with a cleared latch.
+	/// explicit "reset fork layout" transition; a successful reset also
+	/// cancels an active restoration. Only finishGeometryRestore() persists
+	/// geometry together with a cleared latch.
 	SaveResult save(const UiState &state, QString *errorString = nullptr, bool clearRestoreBlock = false);
 
 	/// Begins a guarded geometry restoration.
@@ -173,9 +179,11 @@ public:
 	/// mode's geometry is needed again for finishGeometryRestore()).
 	///
 	/// Returns false - and restoration must be skipped in favor of safe
-	/// defaults - when the session is already blocked, when the candidate is
-	/// invalid, or when the guard write fails or is refused. Also refuses a
-	/// second call until the restoration is finished or aborted.
+	/// defaults - when the session is already blocked, when the existing
+	/// sidecar on disk carries the restore latch (independently of load()),
+	/// when the candidate is invalid, or when the guard write fails or is
+	/// refused. Also refuses a second call until the restoration is finished
+	/// or aborted.
 	bool beginGeometryRestore(const UiState &candidate, QString *errorString = nullptr);
 
 	/// Completes a guarded restoration after QWidget::restoreGeometry()
@@ -187,7 +195,8 @@ public:
 	/// Aborts a guarded restoration after QWidget::restoreGeometry() failed.
 	/// Persists the passed values with both geometries cleared and the latch
 	/// released: Qt rejected the bytes, so fall back to safe placement without
-	/// keeping them.
+	/// keeping them. Requires a successful beginGeometryRestore() in this
+	/// process; otherwise fails with SaveResult::InvalidOperation.
 	SaveResult abortGeometryRestore(const UiState &current, QString *errorString = nullptr);
 
 	/// Renames an existing invalid sidecar out of the way so normal writes can
@@ -203,11 +212,15 @@ private:
 	/// rules). Returns an error description, or an empty string when valid.
 	static QString validateValues(const UiState &state);
 
-	/// Shared write path: checks overwrite protection, stamps metadata, and
-	/// writes the JSON document atomically. includeGeometry=false strips both
-	/// geometries from the persisted values.
+	/// Shared write path: checks overwrite protection (including the on-disk
+	/// restore latch), stamps metadata, and writes the JSON document
+	/// atomically. includeGeometry=false strips both geometries from the
+	/// persisted values. A write that would persist geometry with a cleared
+	/// latch over a latched existing file keeps the latch and strips geometry
+	/// instead, unless mayReleaseLatchedExisting is set (the explicit reset
+	/// transition and finishGeometryRestore() only).
 	SaveResult writeValidated(const UiState &values, bool writeRestoreBlocked, bool includeGeometry,
-							  QString *errorString);
+							  bool mayReleaseLatchedExisting, QString *errorString);
 
 	QString m_sidecarPath;
 	UiState m_loadedState;

@@ -112,9 +112,13 @@ private slots:
 	void newerVersionPreserved();
 	void invalidJsonAndTypes();
 	void geometryValidation();
+	void splitterZeroPaneRoundTrip();
 	void failedWrites();
 	void restorationGuard();
 	void interruptedRestorationRecovery();
+	void onDiskLatchAcrossInstances();
+	void restoreProtocolNegativePaths();
+	void nestedNonexistentDirectories();
 	void sidecarPathResolution();
 	void unknownKeysTolerated();
 	void quarantineRecovery();
@@ -393,6 +397,46 @@ void TestUiStateStore::geometryValidation() {
 	QCOMPARE(afterSave.load(), UiStateStore::LoadResult::Loaded);
 }
 
+void TestUiStateStore::splitterZeroPaneRoundTrip() {
+	QTemporaryDir dir;
+	const QString settings = settingsPath(dir);
+
+	// Zero is a valid splitter size (Qt collapses a pane to zero); it must
+	// survive a save/load round trip.
+	UiState state;
+	state.normalSplitterSizes = QList< int >{ 240, 0, 720 };
+	UiStateStore store(settings);
+	QString error;
+	QCOMPARE(store.save(state, &error), UiStateStore::SaveResult::Saved);
+	QVERIFY(error.isEmpty());
+	UiStateStore reloaded(settings);
+	QCOMPARE(reloaded.load(&error), UiStateStore::LoadResult::Loaded);
+	const QList< int > expectedSizes{ 240, 0, 720 };
+	QCOMPARE(reloaded.loadedState().normalSplitterSizes, expectedSizes);
+
+	// Parsing accepts a zero pane from a hand-written sidecar as well.
+	const QString zeroSettings = settingsPath(dir, QStringLiteral("zero.json"));
+	QVERIFY(writeBytes(sidecarPathFor(zeroSettings),
+					   makeSidecar({ { QStringLiteral("normal"),
+									   QJsonObject{ { QStringLiteral("splitterSizes"),
+													  QJsonArray{ 0, 100 } } } } })));
+	UiStateStore zeroed(zeroSettings);
+	QCOMPARE(zeroed.load(&error), UiStateStore::LoadResult::Loaded);
+	const QList< int > expectedZeroSizes{ 0, 100 };
+	QCOMPARE(zeroed.loadedState().normalSplitterSizes, expectedZeroSizes);
+
+	// Negative and oversized values remain invalid when passed
+	// programmatically (the on-disk variants are covered by
+	// invalidJsonAndTypes).
+	UiState negative;
+	negative.normalSplitterSizes = QList< int >{ -1, 100 };
+	QCOMPARE(store.save(negative, &error), UiStateStore::SaveResult::InvalidInput);
+	QVERIFY(!error.isEmpty());
+	UiState oversized;
+	oversized.normalSplitterSizes = QList< int >{ 100, UiStateStore::MaxSplitterSize + 1 };
+	QCOMPARE(store.save(oversized, &error), UiStateStore::SaveResult::InvalidInput);
+}
+
 void TestUiStateStore::failedWrites() {
 	QTemporaryDir dir;
 
@@ -551,6 +595,150 @@ void TestUiStateStore::interruptedRestorationRecovery() {
 	UiStateStore fresh(settings);
 	QCOMPARE(fresh.load(), UiStateStore::LoadResult::Loaded);
 	QCOMPARE(fresh.loadedState().normalGeometry, sampleState().normalGeometry);
+}
+
+void TestUiStateStore::onDiskLatchAcrossInstances() {
+	QTemporaryDir dir;
+	const QString settings = settingsPath(dir);
+	const QString sidecar  = sidecarPathFor(settings);
+
+	// Simulate a crash between guard write and finish: the latch is on disk,
+	// and the process that set it is gone.
+	UiStateStore crashed(settings);
+	QCOMPARE(crashed.beginGeometryRestore(sampleState()), true);
+
+	// A fresh instance that never called load() must not smuggle geometry
+	// past the on-disk latch through an ordinary save: preferences persist,
+	// the latch stays, geometry is stripped.
+	UiStateStore unaware(settings);
+	QString error;
+	QCOMPARE(unaware.save(sampleState(), &error), UiStateStore::SaveResult::Saved);
+	QJsonObject root = parseObject(sidecar);
+	QCOMPARE(root.value(QStringLiteral("restoreBlocked")).toBool(), true);
+	QCOMPARE(root.value(QStringLiteral("minimal")).toBool(), true);
+	QVERIFY(!root.value(QStringLiteral("normal")).toObject().contains(QStringLiteral("geometry")));
+	QVERIFY(!root.value(QStringLiteral("compact")).toObject().contains(QStringLiteral("geometry")));
+
+	// A fresh instance must not start a new guarded restoration either (that
+	// would re-arm the crashed restoration and defeat the latch).
+	UiStateStore alsoUnaware(settings);
+	QCOMPARE(alsoUnaware.beginGeometryRestore(sampleState(), &error), false);
+	QVERIFY(!error.isEmpty());
+	error.clear();
+
+	// Only the explicit reset releases the on-disk latch - and it persists no
+	// geometry.
+	UiStateStore resetting(settings);
+	QCOMPARE(resetting.save(sampleState(), &error, /*clearRestoreBlock=*/true),
+			 UiStateStore::SaveResult::Saved);
+	root = parseObject(sidecar);
+	QCOMPARE(root.value(QStringLiteral("restoreBlocked")).toBool(), false);
+	QVERIFY(!root.value(QStringLiteral("normal")).toObject().contains(QStringLiteral("geometry")));
+	QVERIFY(!root.value(QStringLiteral("compact")).toObject().contains(QStringLiteral("geometry")));
+
+	// With the latch released, an ordinary save from yet another fresh
+	// instance persists geometry normally.
+	UiStateStore next(settings);
+	QCOMPARE(next.save(sampleState(), &error), UiStateStore::SaveResult::Saved);
+	root = parseObject(sidecar);
+	QCOMPARE(root.value(QStringLiteral("restoreBlocked")).toBool(), false);
+	QVERIFY(root.value(QStringLiteral("normal")).toObject().contains(QStringLiteral("geometry")));
+	UiStateStore reloaded(settings);
+	QCOMPARE(reloaded.load(), UiStateStore::LoadResult::Loaded);
+	QCOMPARE(reloaded.loadedState().normalGeometry, sampleState().normalGeometry);
+}
+
+void TestUiStateStore::restoreProtocolNegativePaths() {
+	QTemporaryDir dir;
+	const QString settings = settingsPath(dir);
+	const QString sidecar  = sidecarPathFor(settings);
+
+	// abort without a preceding successful begin is a hard protocol error,
+	// exactly like finish; nothing is written.
+	UiStateStore store(settings);
+	QString error;
+	QCOMPARE(store.abortGeometryRestore(sampleState(), &error),
+			 UiStateStore::SaveResult::InvalidOperation);
+	QVERIFY(!error.isEmpty());
+	QVERIFY(!QFileInfo::exists(sidecar));
+
+#ifdef Q_OS_UNIX
+	// A failed explicit reset leaves an active restoration intact: the
+	// protocol can still be finished afterwards.
+	const QString roSettings = settingsPath(dir, QStringLiteral("ro/mumble_settings.json"));
+	const QString roDir      = QFileInfo(roSettings).absolutePath();
+	const QString roSidecar  = sidecarPathFor(roSettings);
+	UiStateStore restoring(roSettings);
+	QCOMPARE(restoring.beginGeometryRestore(sampleState()), true);
+
+	QFile roDirFile(roDir);
+	QVERIFY(roDirFile.setPermissions(QFileDevice::ReadOwner | QFileDevice::ExeOwner));
+	QCOMPARE(restoring.save(sampleState(), &error, /*clearRestoreBlock=*/true),
+			 UiStateStore::SaveResult::WriteError);
+	// Restore permissions so QTemporaryDir cleanup can remove the directory.
+	QVERIFY(roDirFile.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner
+									 | QFileDevice::ExeOwner));
+
+	// The failed reset did not cancel the restoration: finish still works and
+	// persists geometry together with the released latch.
+	QCOMPARE(restoring.finishGeometryRestore(sampleState(), &error),
+			 UiStateStore::SaveResult::Saved);
+	const QJsonObject root = parseObject(roSidecar);
+	QCOMPARE(root.value(QStringLiteral("restoreBlocked")).toBool(), false);
+	QVERIFY(root.value(QStringLiteral("normal")).toObject().contains(QStringLiteral("geometry")));
+#else
+	QSKIP("Read-only directory enforcement is not available on this platform");
+#endif
+}
+
+void TestUiStateStore::nestedNonexistentDirectories() {
+	QTemporaryDir dir;
+	const QString canonical = QFileInfo(dir.path()).canonicalFilePath();
+	QVERIFY(!canonical.isEmpty());
+
+	// Multiple missing intermediate directories are preserved in the derived
+	// sidecar path (regression: they used to be dropped while walking up to
+	// the deepest existing ancestor).
+	const QString deepSettings =
+		dir.filePath(QStringLiteral("profiles/group/nested/deep/mumble_settings.json"));
+	const QString deepSidecar =
+		canonical + QStringLiteral("/profiles/group/nested/deep/mumble_settings.json.new-ui.json");
+	QCOMPARE(UiStateStore::sidecarPathFor(deepSettings), deepSidecar);
+	UiStateStore deep(deepSettings);
+	QCOMPARE(deep.sidecarPath(), deepSidecar);
+	QCOMPARE(deep.load(), UiStateStore::LoadResult::NoSidecar);
+
+	// Distinct profiles with identical file names in different not-yet-created
+	// directories derive distinct sidecar paths (they used to collapse into
+	// one) and stay independent once the directories come into existence.
+	const QString settingsA = dir.filePath(QStringLiteral("notyet/a/mumble_settings.json"));
+	const QString settingsB = dir.filePath(QStringLiteral("notyet/b/mumble_settings.json"));
+	const QString sidecarA  = canonical + QStringLiteral("/notyet/a/mumble_settings.json.new-ui.json");
+	const QString sidecarB  = canonical + QStringLiteral("/notyet/b/mumble_settings.json.new-ui.json");
+	QCOMPARE(UiStateStore::sidecarPathFor(settingsA), sidecarA);
+	QCOMPARE(UiStateStore::sidecarPathFor(settingsB), sidecarB);
+	QVERIFY(sidecarA != sidecarB);
+
+	QVERIFY(QDir().mkpath(QFileInfo(settingsA).absolutePath()));
+	QVERIFY(QDir().mkpath(QFileInfo(settingsB).absolutePath()));
+	QVERIFY(writeBytes(settingsA, QByteArrayLiteral("{}")));
+	QVERIFY(writeBytes(settingsB, QByteArrayLiteral("{}")));
+	UiStateStore storeA(settingsA);
+	UiStateStore storeB(settingsB);
+	QCOMPARE(storeA.save(sampleState()), UiStateStore::SaveResult::Saved);
+	UiState plain;
+	plain.minimal = true;
+	QCOMPARE(storeB.save(plain), UiStateStore::SaveResult::Saved);
+	QVERIFY(QFileInfo::exists(sidecarA));
+	QVERIFY(QFileInfo::exists(sidecarB));
+
+	UiStateStore reloadedA(settingsA);
+	QCOMPARE(reloadedA.load(), UiStateStore::LoadResult::Loaded);
+	QCOMPARE(reloadedA.loadedState().normalGeometry, sampleState().normalGeometry);
+	UiStateStore reloadedB(settingsB);
+	QCOMPARE(reloadedB.load(), UiStateStore::LoadResult::Loaded);
+	QCOMPARE(reloadedB.loadedState().minimal, true);
+	QVERIFY(reloadedB.loadedState().normalGeometry.isEmpty());
 }
 
 void TestUiStateStore::sidecarPathResolution() {
