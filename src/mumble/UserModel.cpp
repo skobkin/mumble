@@ -508,6 +508,10 @@ QVariant UserModel::data(const QModelIndex &idx, int role) const {
 		return hasCommentIcon;
 	}
 
+	if (role == RowKindRole) {
+		return static_cast< int >(item->isListener ? RowKind::Listener : (p ? RowKind::User : RowKind::Channel));
+	}
+
 	QVariant v = otherRoles(idx, role);
 	if (v.isValid())
 		return v;

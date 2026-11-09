@@ -16,20 +16,18 @@
 #include <QtGui/QDesktopServices>
 #include <QtGui/QHelpEvent>
 #include <QtGui/QPainter>
+#include <QtWidgets/QStyle>
 #include <QtWidgets/QWhatsThis>
 
 UserDelegate::UserDelegate(QObject *p) : QStyledItemDelegate(p) {
 }
 
-void UserDelegate::adjustIcons(int iconTotalDimension, int iconIconPadding, int iconIconDimension) {
-	m_iconTotalDimension = iconTotalDimension;
-	m_iconIconPadding    = iconIconPadding;
-	m_iconIconDimension  = iconIconDimension;
+void UserDelegate::adjustIcons(const UserStatusMetrics &metrics) {
+	m_metrics = metrics;
 }
 
 UserStatusGeometry UserDelegate::computeGeometry(const QStyleOptionViewItem &option, const QList< QVariant > &statusIcons,
-												 int commentIconIndex, int iconTotalDimension, int iconIconPadding,
-												 int iconIconDimension) {
+												 int commentIconIndex, const UserStatusMetrics &metrics) {
 	UserStatusGeometry geometry;
 
 	const int iconCount = static_cast< int >(statusIcons.count());
@@ -38,25 +36,77 @@ UserStatusGeometry UserDelegate::computeGeometry(const QStyleOptionViewItem &opt
 		return geometry;
 	}
 
-	const int stripWidth = iconCount * iconTotalDimension;
-	geometry.stripRect   = QRect(option.rect.right() - stripWidth, option.rect.y(), stripWidth, option.rect.height());
-	geometry.contentRect = QRect(option.rect.x(), option.rect.y(), option.rect.width() - stripWidth,
-								 option.rect.height());
+	const int stripWidth = iconCount * metrics.iconTotalDimension;
 
-	const int iconPosY = (option.rect.height() / 2) - (iconIconDimension / 2);
+	// Logical (left-to-right) layout: the strip occupies the trailing end of
+	// the row, inset from the row edge; the content area keeps a small gap
+	// to the strip.
+	QRect strip(option.rect.x() + option.rect.width() - stripWidth - metrics.stripInset, option.rect.y(), stripWidth,
+				option.rect.height());
+	QRect content(option.rect.x(), option.rect.y(),
+				  option.rect.width() - stripWidth - metrics.stripInset - metrics.contentGap, option.rect.height());
+
+	const int iconPosY = (option.rect.height() / 2) - (metrics.iconIconDimension / 2);
 	geometry.iconRects.reserve(iconCount);
 	for (int i = 0; i < iconCount; ++i) {
-		QRect iconRect = geometry.stripRect;
-		iconRect.setSize(QSize(iconIconDimension, iconIconDimension));
-		iconRect.translate(i * iconTotalDimension + iconIconPadding, iconPosY);
+		QRect iconRect = strip;
+		iconRect.setSize(QSize(metrics.iconIconDimension, metrics.iconIconDimension));
+		iconRect.translate(i * metrics.iconTotalDimension + metrics.iconIconPadding, iconPosY);
 		geometry.iconRects.append(iconRect);
 	}
+
+	// In right-to-left layouts both the strip and the content area move to
+	// the visual trailing edge, and the icon slots are laid out mirrored
+	// within the strip so the leading icon (the comment indicator) stays
+	// adjacent to the content area.
+	if (option.direction == Qt::RightToLeft) {
+		strip   = QStyle::visualRect(option.direction, option.rect, strip);
+		content = QStyle::visualRect(option.direction, option.rect, content);
+		for (int i = 0; i < iconCount; ++i) {
+			QRect &iconRect = geometry.iconRects[i];
+			iconRect.moveLeft(strip.left() + strip.width() - (i + 1) * metrics.iconTotalDimension
+							  + metrics.iconIconPadding);
+		}
+	}
+
+	geometry.stripRect   = strip;
+	geometry.contentRect = content;
 
 	if (commentIconIndex >= 0 && commentIconIndex < iconCount) {
 		geometry.commentIconRect = geometry.iconRects.at(commentIconIndex);
 	}
 
 	return geometry;
+}
+
+QFont UserDelegate::refinedFont(const QFont &base, UserModel::RowKind kind) {
+	QFont font = base;
+	switch (kind) {
+		case UserModel::RowKind::Channel:
+			// Channels structure the tree: one weight step heavier than
+			// users. Compose with the model-provided font instead of
+			// replacing it - a bold home channel or an italic linked
+			// channel keeps its own emphasis, so never go lighter.
+			font.setWeight(qMax(font.weight(), QFont::DemiBold));
+			break;
+		case UserModel::RowKind::Listener:
+			// Listener proxies are always italic, whatever the
+			// model-provided font says.
+			font.setItalic(true);
+			break;
+		case UserModel::RowKind::User:
+			break;
+	}
+	return font;
+}
+
+QPalette::ColorRole UserDelegate::textColorRole(UserModel::RowKind kind, bool selected) {
+	if (kind == UserModel::RowKind::Listener && !selected) {
+		// Dim listener proxies that are not selected; the italic text and
+		// the ear icon retain the non-color identification.
+		return QPalette::PlaceholderText;
+	}
+	return selected ? QPalette::HighlightedText : QPalette::Text;
 }
 
 void UserDelegate::paint(QPainter *painter, const QStyleOptionViewItem &option, const QModelIndex &index) const {
@@ -76,10 +126,26 @@ void UserDelegate::paint(QPainter *painter, const QStyleOptionViewItem &option, 
 	QStyleOptionViewItem o = option;
 	initStyleOption(&o, index);
 
+	// The geometry below derives from the layout direction, so all three of
+	// its consumers (paint, help events, click hit-testing) must agree on
+	// it: take it from the widget, not from whatever the option carries.
+	if (o.widget) {
+		o.direction = o.widget->layoutDirection();
+	}
+
+	// Classify the row for the typography/color refinements; the model
+	// provides the kind, so no icon, string or font heuristics here.
+	const UserModel::RowKind kind = static_cast< UserModel::RowKind >(index.data(UserModel::RowKindRole).toInt());
+
+	// Refine the typography per row kind, composing with the model-provided
+	// font (FontRole) instead of replacing it.
+	o.font        = refinedFont(o.font, kind);
+	o.fontMetrics = QFontMetrics(o.font);
+
 	QStyle *style        = o.widget->style();
 	QIcon::Mode iconMode = QIcon::Normal;
 
-	QPalette::ColorRole colorRole = ((o.state & QStyle::State_Selected) ? QPalette::HighlightedText : QPalette::Text);
+	QPalette::ColorRole colorRole = textColorRole(kind, o.state & QStyle::State_Selected);
 #if defined(Q_OS_WIN)
 	// Qt's Vista Style has the wrong highlight color for treeview items
 	// We can't check for QStyleSheetStyle so we have to search the children list search for a QWindowsVistaStyle
@@ -87,7 +153,11 @@ void UserDelegate::paint(QPainter *painter, const QStyleOptionViewItem &option, 
 	hierarchy.insert(0, style);
 	for (QObject *obj : hierarchy) {
 		if (QString::fromUtf8(obj->metaObject()->className()) == QString::fromUtf8("QWindowsVistaStyle")) {
-			colorRole = QPalette::Text;
+			// Only the selected-row role is wrong on Vista; the dimmed
+			// listener color is unaffected.
+			if (colorRole == QPalette::HighlightedText) {
+				colorRole = QPalette::Text;
+			}
 			break;
 		}
 	}
@@ -98,11 +168,15 @@ void UserDelegate::paint(QPainter *painter, const QStyleOptionViewItem &option, 
 
 	// the shared geometry decides where the status icons sit and what
 	// remains of the row for decoration and text
-	const UserStatusGeometry geometry = computeGeometry(option, ql, -1, m_iconTotalDimension, m_iconIconPadding,
-														m_iconIconDimension);
+	const UserStatusGeometry geometry = computeGeometry(o, ql, -1, m_metrics);
+
+	// the focus ring spans the whole row; capture its rect before the
+	// option's rect is narrowed to the content area
+	const bool hasFocus  = o.state & QStyle::State_HasFocus;
+	const QRect focusRect = hasFocus ? style->subElementRect(QStyle::SE_ItemViewItemFocusRect, &o, o.widget) : QRect();
 
 	// draw icon
-	o.rect            = geometry.contentRect;
+	o.rect                = geometry.contentRect;
 	QRect decorationRect = style->subElementRect(QStyle::SE_ItemViewItemDecoration, &o, o.widget);
 	o.icon.paint(painter, decorationRect, o.decorationAlignment, iconMode, QIcon::On);
 
@@ -115,8 +189,18 @@ void UserDelegate::paint(QPainter *painter, const QStyleOptionViewItem &option, 
 
 	// draw the status icons at the shared geometry's positions
 	for (int i = 0; i < ql.size(); ++i) {
-		qvariant_cast< QIcon >(ql[i]).paint(painter, geometry.iconRects.at(i), option.decorationAlignment, iconMode,
+		qvariant_cast< QIcon >(ql[i]).paint(painter, geometry.iconRects.at(i), o.decorationAlignment, iconMode,
 											QIcon::On);
+	}
+
+	// draw the keyboard focus ring the default delegate's CE_ItemViewItem
+	// rendering would have drawn (painting the parts ourselves dropped it)
+	if (hasFocus) {
+		QStyleOptionFocusRect focusOption;
+		focusOption.QStyleOption::operator=(o);
+		focusOption.rect = focusRect;
+		focusOption.state |= QStyle::State_KeyboardFocusChange | QStyle::State_Item;
+		style->drawPrimitive(QStyle::PE_FrameFocusRect, &focusOption, painter, o.widget);
 	}
 
 	painter->restore();
@@ -131,9 +215,14 @@ bool UserDelegate::helpEvent(QHelpEvent *evt, QAbstractItemView *view, const QSt
 		QList< QVariant > iconList       = data.toList();
 
 		// the shared geometry decides which positions belong to the status
-		// icons: help events there answer the column-1 flags tooltip
-		const UserStatusGeometry geometry = computeGeometry(option, iconList, -1, m_iconTotalDimension,
-															m_iconIconPadding, m_iconIconDimension);
+		// icons: help events there answer the column-1 flags tooltip. As in
+		// paint(), the layout direction comes from the view so the strip is
+		// hit-tested where it is painted.
+		QStyleOptionViewItem stripOption = option;
+		if (view) {
+			stripOption.direction = view->layoutDirection();
+		}
+		const UserStatusGeometry geometry = computeGeometry(stripOption, iconList, -1, m_metrics);
 
 		if (geometry.stripRect.contains(evt->pos())) {
 			return QStyledItemDelegate::helpEvent(evt, view, option, firstColumnIdx);
@@ -158,10 +247,26 @@ void UserView::adjustIcons() {
 	// Calculate the icon size for status icons based on font size
 	// This should automaticially adjust size when the user has
 	// display scaling enabled
-	m_iconTotalDimension = QFontMetrics(font()).height();
-	m_iconIconPadding    = 1;
-	m_iconIconDimension  = m_iconTotalDimension - (2 * m_iconIconPadding);
-	m_userDelegate->adjustIcons(m_iconTotalDimension, m_iconIconPadding, m_iconIconDimension);
+	const QFontMetrics fontMetrics(font());
+
+	UserStatusMetrics metrics;
+	metrics.iconTotalDimension = fontMetrics.height();
+	metrics.iconIconPadding    = 1;
+	metrics.iconIconDimension  = metrics.iconTotalDimension - (2 * metrics.iconIconPadding);
+
+	// font-derived breathing room around the status strip, clamped so
+	// pathological fonts cannot push it into absurdity
+	const int spacing          = qBound(2, fontMetrics.horizontalAdvance(QStringLiteral("n")) / 2, 8);
+	metrics.stripInset         = spacing;
+	metrics.contentGap         = spacing;
+
+	m_iconMetrics = metrics;
+	m_userDelegate->adjustIcons(metrics);
+
+	// tree indentation follows the same font metrics instead of a fixed
+	// pixel default, so it scales with the font (and with display scaling)
+	setIndentation(qBound(12, fontMetrics.height() + 4, 40));
+
 	viewport()->update();
 }
 
@@ -191,7 +296,10 @@ bool UserView::event(QEvent *evt) {
 QStyleOptionViewItem UserView::itemOptionFor(const QModelIndex &idx) const {
 	QStyleOptionViewItem option;
 	initViewItemOption(&option);
-	option.rect = visualRect(idx);
+	option.rect      = visualRect(idx);
+	// paint() and helpEvent() derive the strip position from the widget's
+	// layout direction; the click hit-test must see the same one.
+	option.direction = layoutDirection();
 	return option;
 }
 
@@ -215,8 +323,7 @@ void UserView::mouseReleaseEvent(QMouseEvent *evt) {
 
 		if (hasCommentIcon) {
 			QStyleOptionViewItem option = itemOptionFor(idx);
-			const UserStatusGeometry geometry = UserDelegate::computeGeometry(
-				option, iconList, 0, m_iconTotalDimension, m_iconIconPadding, m_iconIconDimension);
+			const UserStatusGeometry geometry = UserDelegate::computeGeometry(option, iconList, 0, m_iconMetrics);
 
 			if (geometry.commentIconRect.contains(clickPosition)) {
 				// Clicked the comment icon. Consuming the release here also

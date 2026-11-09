@@ -112,11 +112,21 @@ protected:
 	void removeChannelListener(ModelItem *item, ModelItem *citem = nullptr);
 
 public:
+	/// Classification of a tree row for presentation purposes: a channel, a
+	/// regular user, or a listener proxy. Lets the view side style rows
+	/// without inferring the kind from icon identity, localized strings or
+	/// font heuristics.
+	enum class RowKind : int { Channel, User, Listener };
+
 	/// Item role (bool): whether this row's status-icon list (column 1,
 	/// Qt::DisplayRole) begins with the comment indicator. Presentation-only,
 	/// so view-side hit-testing can use the painted icon geometry without
 	/// reconstructing icon presence from ClientUser/Channel flags.
 	static constexpr int CommentIconRole = Qt::UserRole + 1;
+
+	/// Item role (RowKind as int): the classification of this row. Served
+	/// for both columns on every row. Presentation-only.
+	static constexpr int RowKindRole = Qt::UserRole + 2;
 
 	UserModel(QObject *parent = 0);
 	~UserModel() Q_DECL_OVERRIDE;

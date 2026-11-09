@@ -3,15 +3,18 @@
 // found in the LICENSE file at the root of the Mumble source tree or at
 // <https://www.mumble.info/LICENSE>.
 
-// Tests for the shared status-icon geometry of the channel/user tree
-// (Stage 3 of the new UI, commit 1). UserModel's real data() path requires a
-// Global/database/server environment, so the view/delegate integration runs
-// against a synthetic model mirroring UserModel's observable presentation
-// protocol. What these fixtures prove: one geometry drives painting bounds,
-// tooltip forwarding and click hit-testing; the comment hitbox sits on the
-// painted comment icon for every status combination (including the
-// push-to-mute and listener-proxy rows the old flag-based reconstruction got
-// wrong); and icon metrics track font changes at construction and at runtime.
+// Tests for the shared status-icon geometry and the modernized presentation
+// of the channel/user tree (Stage 3 of the new UI). UserModel's real data()
+// path requires a Global/database/server environment, so the view/delegate
+// integration runs against a synthetic model mirroring UserModel's observable
+// presentation protocol. What these fixtures prove: one geometry drives
+// painting bounds, tooltip forwarding and click hit-testing; the comment
+// hitbox sits on the painted comment icon for every status combination
+// (including the push-to-mute and listener-proxy rows the old flag-based
+// reconstruction got wrong); icon metrics and tree indentation track font
+// changes at construction and at runtime; the strip mirrors to the visual
+// trailing edge in right-to-left layouts (geometry, clicks and painted
+// pixels); and the per-row-kind typography/focus refinements render.
 // Server-driven behavior (comments arriving, seen-state, talking state)
 // stays on the live checklist.
 
@@ -21,11 +24,14 @@
 #include "UserView.h"
 
 #include <QApplication>
+#include <QColor>
 #include <QEvent>
 #include <QHelpEvent>
 #include <QIcon>
+#include <QImage>
 #include <QModelIndex>
 #include <QObject>
+#include <QPainter>
 #include <QPixmap>
 #include <QRect>
 #include <QSignalSpy>
@@ -57,7 +63,8 @@ QIcon otherStatusIcon() {
 //  - column 0: DisplayRole name, DecorationRole icon, optional FontRole;
 //  - column 1: DisplayRole = the status-icon QVariantList, ToolTipRole the
 //    flags tooltip (counted when queried so tests can see the forwarding);
-//  - CommentIconRole: whether the leading status icon is the comment.
+//  - CommentIconRole: whether the leading status icon is the comment;
+//  - RowKindRole: Channel / User / Listener classification.
 // It never emits dataChanged (UserView::dataChanged assumes a UserModel).
 class FakeNavigationModel : public QAbstractItemModel {
 public:
@@ -203,6 +210,11 @@ public:
 				return rowNode->name;
 			case UserModel::CommentIconRole:
 				return rowNode->commentIcon;
+			case UserModel::RowKindRole:
+				return static_cast< int >(rowNode->type == RowType::Channel
+											  ? UserModel::RowKind::Channel
+											  : (rowNode->type == RowType::Listener ? UserModel::RowKind::Listener
+																					: UserModel::RowKind::User));
 		}
 
 		return QVariant();
@@ -250,9 +262,10 @@ class TestUserNavigation : public QObject {
 	Q_OBJECT
 
 private slots:
-	// The shared calculation must reproduce the pre-refactor inline math of
-	// paint()/helpEvent() exactly (pixel-identical rendering).
-	void geometryPreservesLegacyFormulas();
+	// The shared calculation follows the documented contract for both
+	// layout directions: trailing-edge strip with inset, content gap,
+	// mirrored icon slots in RTL.
+	void geometryFollowsMetricsContract();
 	void geometryIconRectsAreDisjointInsideStrip();
 	void commentRectIsTheLeadingIconInView();
 
@@ -266,13 +279,22 @@ private slots:
 	// return value, which mirrors the tooltip data).
 	void helpEventForwardsExactlyTheIconStrip();
 
-	// Commit 1 pins the existing RTL behavior (strip anchored to the
-	// logical right edge); the visual pass flips it later.
-	void iconStripStaysRightAnchoredInRtl();
+	// In right-to-left layouts the strip must move to the visual trailing
+	// edge - in the geometry, in click classification, and in what is
+	// actually painted (viewport grab evidence).
+	void iconStripMirrorsToVisualTrailingEdgeInRtl();
+
+	// Typography and color refinements per RowKind, composing with (not
+	// replacing) the model-provided font.
+	void typographyRefinesPerRowKind();
+
+	// The keyboard focus ring renders when the row option carries focus.
+	void focusRingRendersWhenFocused();
 
 	void iconMetricsTrackLargeFontsAtConstruction();
 	void iconMetricsTrackRuntimeFontChange();
 	void styleChangeRefreshesIconMetrics();
+	void indentationFollowsFontMetrics();
 	void narrowWidthShrinksContentAreaByStrip();
 
 private:
@@ -315,10 +337,33 @@ private:
 		return QModelIndex();
 	}
 
+	/// Counts strongly blue or red pixels (the fixture icon colors) in the
+	/// left and right half of a row band of a rendered image - where the
+	/// status-icon strip was actually painted.
+	static QPair< int, int > coloredPixelsPerSide(const QImage &image, const QRect &rowRect) {
+		int leftCount  = 0;
+		int rightCount = 0;
+		for (int y = rowRect.top(); y <= rowRect.bottom(); ++y) {
+			for (int x = rowRect.left(); x <= rowRect.right(); ++x) {
+				const QColor color(image.pixel(x, y));
+				const bool blue = (color.blueF() > 0.4 && color.blueF() > color.redF() + 0.2
+								   && color.blueF() > color.greenF() + 0.2);
+				const bool red  = (color.redF() > 0.4 && color.redF() > color.blueF() + 0.2
+								   && color.redF() > color.greenF() + 0.2);
+				if (!blue && !red)
+					continue;
+				if (x <= rowRect.center().x())
+					++leftCount;
+				else
+					++rightCount;
+			}
+		}
+		return qMakePair(leftCount, rightCount);
+	}
+
 	/// The geometry the production hit-test path computes for a row: driven
 	/// by the model-provided icon list, the CommentIconRole and the view's
-	/// current icon metrics (padding 1, dimension total-2, as adjustIcons
-	/// derives them).
+	/// current font-derived metrics.
 	static UserStatusGeometry rowGeometry(const UserView &view, const QModelIndex &idx) {
 		QStyleOptionViewItem option;
 		option.rect      = view.visualRect(idx);
@@ -326,67 +371,92 @@ private:
 
 		const QList< QVariant > icons = idx.sibling(idx.row(), 1).data(Qt::DisplayRole).toList();
 		const bool commentIcon        = idx.data(UserModel::CommentIconRole).toBool();
-		const int total               = view.statusIconDimension();
 
-		return UserDelegate::computeGeometry(option, icons, commentIcon ? 0 : -1, total, 1, total - 2);
+		return UserDelegate::computeGeometry(option, icons, commentIcon ? 0 : -1, view.statusMetrics());
 	}
 };
 
-void TestUserNavigation::geometryPreservesLegacyFormulas() {
-	const int total     = 16;
-	const int padding   = 1;
-	const int dimension = 14;
+void TestUserNavigation::geometryFollowsMetricsContract() {
+	UserStatusMetrics metrics;
+	metrics.iconTotalDimension = 16;
+	metrics.iconIconPadding    = 1;
+	metrics.iconIconDimension  = 14;
+	metrics.stripInset         = 3;
+	metrics.contentGap         = 3;
+
+	const int iconPosY = (24 / 2) - (metrics.iconIconDimension / 2);
 
 	for (int count = 0; count <= 6; ++count) {
-		QStyleOptionViewItem option;
-		option.rect      = QRect(7, 11, 300, 24);
-		option.direction = Qt::LeftToRight;
-
 		QVariantList icons;
 		for (int i = 0; i < count; ++i)
 			icons << QVariant(commentStatusIcon());
 
-		const UserStatusGeometry geometry =
-			UserDelegate::computeGeometry(option, icons, count > 0 ? 0 : -1, total, padding, dimension);
+		for (const Qt::LayoutDirection direction : { Qt::LeftToRight, Qt::RightToLeft }) {
+			QStyleOptionViewItem option;
+			option.rect      = QRect(7, 11, 300, 24);
+			option.direction = direction;
 
-		// The pre-refactor inline math of paint()/helpEvent().
-		const QRect legacyStrip = QRect(option.rect.right() - count * total, option.rect.y(), count * total,
-										option.rect.height());
+			const UserStatusGeometry geometry =
+				UserDelegate::computeGeometry(option, icons, count > 0 ? 0 : -1, metrics);
 
-		if (count == 0) {
-			QVERIFY(!geometry.stripRect.isValid());
-			QVERIFY(geometry.iconRects.isEmpty());
-			QVERIFY(!geometry.commentIconRect.isValid());
-			QCOMPARE(geometry.contentRect, option.rect);
-		} else {
-			QCOMPARE(geometry.stripRect, legacyStrip);
-			QCOMPARE(geometry.contentRect, option.rect.adjusted(0, 0, -(count * total), 0));
-
-			const int legacyIconPosY = (option.rect.height() / 2) - (dimension / 2);
-			for (int i = 0; i < count; ++i) {
-				QRect legacyIcon = legacyStrip;
-				legacyIcon.setSize(QSize(dimension, dimension));
-				legacyIcon.translate(i * total + padding, legacyIconPosY);
-				// The pre-refactor paint() wrapped this rect in
-				// QStyle::alignedRect with a cell of equal size - an
-				// identity operation - so the plain rect is exact.
-				QCOMPARE(geometry.iconRects.at(i), legacyIcon);
+			if (count == 0) {
+				QVERIFY(!geometry.stripRect.isValid());
+				QVERIFY(geometry.iconRects.isEmpty());
+				QVERIFY(!geometry.commentIconRect.isValid());
+				QCOMPARE(geometry.contentRect, option.rect);
+				continue;
 			}
 
+			const int stripWidth = count * metrics.iconTotalDimension;
+			QCOMPARE(geometry.stripRect.width(), stripWidth);
+			QCOMPARE(geometry.contentRect.width(),
+					 option.rect.width() - stripWidth - metrics.stripInset - metrics.contentGap);
 			QCOMPARE(geometry.commentIconRect, geometry.iconRects.first());
+
+			for (int i = 0; i < count; ++i) {
+				const QRect expected(direction == Qt::LeftToRight
+										 ? QRect(geometry.stripRect.left() + i * metrics.iconTotalDimension
+												 + metrics.iconIconPadding,
+												 geometry.stripRect.top() + iconPosY, metrics.iconIconDimension,
+												 metrics.iconIconDimension)
+										 : QRect(geometry.stripRect.left() + geometry.stripRect.width()
+												 - (i + 1) * metrics.iconTotalDimension + metrics.iconIconPadding,
+												 geometry.stripRect.top() + iconPosY, metrics.iconIconDimension,
+												 metrics.iconIconDimension));
+				QCOMPARE(geometry.iconRects.at(i), expected);
+			}
+
+			if (direction == Qt::LeftToRight) {
+				// strip at the trailing end, inset from the row edge
+				QCOMPARE(geometry.stripRect.right(), option.rect.right() - metrics.stripInset);
+				QCOMPARE(geometry.contentRect.right(), geometry.stripRect.left() - metrics.contentGap - 1);
+			} else {
+				// mirrored: strip at the left edge, content keeps the right
+				QCOMPARE(geometry.stripRect.left(), option.rect.left() + metrics.stripInset);
+				QCOMPARE(geometry.contentRect.right(), option.rect.right());
+				QCOMPARE(geometry.contentRect.left(), geometry.stripRect.right() + metrics.contentGap + 1);
+				// the leading icon is the one adjacent to the content
+				QCOMPARE(geometry.iconRects.first().right(), geometry.contentRect.left() - metrics.contentGap - 1
+																 - metrics.iconIconPadding);
+			}
 		}
 
 		// Without a comment icon index there is never a comment rect.
-		const UserStatusGeometry withoutComment =
-			UserDelegate::computeGeometry(option, icons, -1, total, padding, dimension);
+		QStyleOptionViewItem option;
+		option.rect      = QRect(7, 11, 300, 24);
+		option.direction = Qt::LeftToRight;
+		const UserStatusGeometry withoutComment = UserDelegate::computeGeometry(option, icons, -1, metrics);
 		QVERIFY(!withoutComment.commentIconRect.isValid());
 	}
 }
 
 void TestUserNavigation::geometryIconRectsAreDisjointInsideStrip() {
-	const int total     = 16;
-	const int padding   = 1;
-	const int dimension = 14;
+	UserStatusMetrics metrics;
+	metrics.iconTotalDimension = 16;
+	metrics.iconIconPadding    = 1;
+	metrics.iconIconDimension  = 14;
+	metrics.stripInset         = 3;
+	metrics.contentGap         = 3;
 
 	QStyleOptionViewItem option;
 	option.rect      = QRect(0, 0, 400, 30);
@@ -397,8 +467,7 @@ void TestUserNavigation::geometryIconRectsAreDisjointInsideStrip() {
 		for (int i = 0; i < count; ++i)
 			icons << QVariant(otherStatusIcon());
 
-		const UserStatusGeometry geometry =
-			UserDelegate::computeGeometry(option, icons, -1, total, padding, dimension);
+		const UserStatusGeometry geometry = UserDelegate::computeGeometry(option, icons, -1, metrics);
 
 		QCOMPARE(geometry.iconRects.count(), count);
 		QVERIFY(geometry.stripRect.contains(geometry.iconRects.at(0)));
@@ -406,11 +475,9 @@ void TestUserNavigation::geometryIconRectsAreDisjointInsideStrip() {
 		for (int i = 0; i + 1 < count; ++i)
 			QVERIFY(geometry.iconRects.at(i).right() < geometry.iconRects.at(i + 1).left());
 
-		// Legacy relation preserved: the content rect ends on the same pixel
-		// column the strip starts on (adjusted(0, 0, -w, 0) vs. the
-		// right()-anchored strip); the painted icons begin one padding
-		// further in, so text and icons never visually overlap.
-		QCOMPARE(geometry.contentRect.right(), geometry.stripRect.left());
+		// The content area keeps the documented gap to the strip: no text
+		// pixel can collide with an icon slot.
+		QCOMPARE(geometry.contentRect.right() + metrics.contentGap + 1, geometry.stripRect.left());
 		QVERIFY(geometry.iconRects.at(0).left() > geometry.contentRect.right());
 	}
 }
@@ -526,34 +593,123 @@ void TestUserNavigation::helpEventForwardsExactlyTheIconStrip() {
 	}
 }
 
-void TestUserNavigation::iconStripStaysRightAnchoredInRtl() {
+void TestUserNavigation::iconStripMirrorsToVisualTrailingEdgeInRtl() {
 	ViewHarness harness;
-	harness.view.setLayoutDirection(Qt::RightToLeft);
-	drainEvents();
 
 	const QModelIndex idx = findRow(&harness.model, QStringLiteral("Comment Plus 3"));
 	QVERIFY(idx.isValid());
 
-	const QRect rowRect               = harness.view.visualRect(idx);
-	const UserStatusGeometry geometry = rowGeometry(harness.view, idx);
+	// LTR control: the painted strip sits on the right side of the row.
+	QRect rowRect                         = harness.view.visualRect(idx);
+	QPair< int, int > ltrColoredPerPixelHalf = coloredPixelsPerSide(harness.view.viewport()->grab().toImage(), rowRect);
+	QVERIFY2(ltrColoredPerPixelHalf.second > ltrColoredPerPixelHalf.first,
+			 "status icons did not paint on the right side in LTR");
+	QVERIFY2(ltrColoredPerPixelHalf.first + ltrColoredPerPixelHalf.second > 50,
+			 "status icons did not paint at all");
+
+	harness.view.setLayoutDirection(Qt::RightToLeft);
+	drainEvents();
+
+	rowRect = harness.view.visualRect(idx);
 	QVERIFY(!rowRect.isEmpty());
+
+	const UserStatusMetrics metrics  = harness.view.statusMetrics();
+	const UserStatusGeometry geometry = rowGeometry(harness.view, idx);
 	QVERIFY(geometry.commentIconRect.isValid());
 
-	// Commit 1 preserves the pre-existing anchoring: the strip sits at the
-	// logical right edge of the row rectangle - one pixel short of the
-	// edge, exactly where the legacy QRect math placed it in every layout
-	// direction. (Commit 2 mirrors strip and content rect for RTL.)
-	QCOMPARE(geometry.stripRect.right(), rowRect.right() - 1);
+	// the strip moves to the visual trailing edge (the left), the content
+	// area keeps the opposite edge, and the leading icon stays adjacent to
+	// the content
+	QCOMPARE(geometry.stripRect.left(), rowRect.left() + metrics.stripInset);
+	QCOMPARE(geometry.contentRect.right(), rowRect.right());
+	QCOMPARE(geometry.iconRects.first().right(), geometry.contentRect.left() - metrics.contentGap - 1
+													 - metrics.iconIconPadding);
 
+	// click classification follows the mirrored geometry
 	QSignalSpy clickedSpy(&harness.view, &QAbstractItemView::clicked);
-	clickedSpy.clear();
 	QTest::mouseClick(harness.view.viewport(), Qt::LeftButton, Qt::NoModifier, geometry.commentIconRect.center());
 	QCOMPARE(clickedSpy.count(), 0);
 
 	clickedSpy.clear();
 	QTest::mouseClick(harness.view.viewport(), Qt::LeftButton, Qt::NoModifier,
-					  QPoint(geometry.contentRect.left() + 10, geometry.contentRect.center().y()));
+					  QPoint(geometry.contentRect.right() - 10, geometry.contentRect.center().y()));
 	QCOMPARE(clickedSpy.count(), 1);
+
+	// painted evidence: the colored icons now render on the left side.
+	// (Reset selection/current first: the click above selected the row and
+	// its blue highlight would drown the icon pixels.)
+	harness.view.selectionModel()->reset();
+	drainEvents();
+	const QPair< int, int > rtlColoredPerPixelHalf =
+		coloredPixelsPerSide(harness.view.viewport()->grab().toImage(), rowRect);
+	QVERIFY2(rtlColoredPerPixelHalf.first > rtlColoredPerPixelHalf.second,
+			 "status icons did not paint on the left side in RTL");
+}
+
+void TestUserNavigation::typographyRefinesPerRowKind() {
+	const QFont base = QApplication::font();
+
+	// channels: one weight step heavier, never lighter than the model font
+	QCOMPARE(UserDelegate::refinedFont(base, UserModel::RowKind::Channel).weight(), QFont::DemiBold);
+	QFont bold = base;
+	bold.setBold(true);
+	QCOMPARE(UserDelegate::refinedFont(bold, UserModel::RowKind::Channel).weight(), QFont::Bold);
+	QFont light = base;
+	light.setWeight(QFont::Light);
+	QCOMPARE(UserDelegate::refinedFont(light, UserModel::RowKind::Channel).weight(), QFont::DemiBold);
+	// other properties compose through untouched
+	QFont italicChannel = base;
+	italicChannel.setItalic(true);
+	QVERIFY(UserDelegate::refinedFont(italicChannel, UserModel::RowKind::Channel).italic());
+
+	// listeners: always italic; users: untouched
+	QVERIFY(UserDelegate::refinedFont(base, UserModel::RowKind::Listener).italic());
+	QFont italic = base;
+	italic.setItalic(true);
+	QVERIFY(UserDelegate::refinedFont(italic, UserModel::RowKind::Listener).italic());
+	QCOMPARE(UserDelegate::refinedFont(base, UserModel::RowKind::User), base);
+
+	// color roles: listeners dim when unselected, everything else regular
+	QCOMPARE(UserDelegate::textColorRole(UserModel::RowKind::User, false), QPalette::Text);
+	QCOMPARE(UserDelegate::textColorRole(UserModel::RowKind::User, true), QPalette::HighlightedText);
+	QCOMPARE(UserDelegate::textColorRole(UserModel::RowKind::Channel, false), QPalette::Text);
+	QCOMPARE(UserDelegate::textColorRole(UserModel::RowKind::Listener, false), QPalette::PlaceholderText);
+	QCOMPARE(UserDelegate::textColorRole(UserModel::RowKind::Listener, true), QPalette::HighlightedText);
+}
+
+void TestUserNavigation::focusRingRendersWhenFocused() {
+	ViewHarness harness;
+
+	UserDelegate *delegate = qobject_cast< UserDelegate * >(harness.view.itemDelegate());
+	QVERIFY(delegate != nullptr);
+
+	const QModelIndex idx = findRow(&harness.model, QStringLiteral("Comment Plus 3"));
+	QVERIFY(idx.isValid());
+	const QRect rowRect = harness.view.visualRect(idx);
+	QVERIFY(!rowRect.isEmpty());
+
+	// render the same row with and without keyboard focus: the focus ring
+	// must add visible pixels (the old custom paint dropped it entirely)
+	auto render = [&](bool focused) {
+		QImage image(rowRect.size(), QImage::Format_ARGB32_Premultiplied);
+		image.fill(Qt::white);
+		QPainter painter(&image);
+
+		QStyleOptionViewItem option;
+		option.rect      = QRect(QPoint(0, 0), rowRect.size());
+		option.widget    = &harness.view;
+		option.state    |= QStyle::State_Enabled | QStyle::State_Active;
+		if (focused)
+			option.state |= QStyle::State_HasFocus;
+
+		delegate->paint(&painter, option, idx);
+		painter.end();
+		return image;
+	};
+
+	const QImage plain    = render(false);
+	const QImage focused  = render(true);
+	QVERIFY(focused != plain);
 }
 
 void TestUserNavigation::iconMetricsTrackLargeFontsAtConstruction() {
@@ -572,12 +728,20 @@ void TestUserNavigation::iconMetricsTrackLargeFontsAtConstruction() {
 	view.expandAll();
 	drainEvents();
 
-	QCOMPARE(view.statusIconDimension(), QFontMetrics(view.font()).height());
+	// the whole metric set is derived from the font the view settled on
+	const UserStatusMetrics metrics = view.statusMetrics();
+	const QFontMetrics fontMetrics(view.font());
+	QCOMPARE(metrics.iconTotalDimension, fontMetrics.height());
+	QCOMPARE(metrics.iconIconPadding, 1);
+	QCOMPARE(metrics.iconIconDimension, fontMetrics.height() - 2);
+	const int expectedSpacing = qBound(2, fontMetrics.horizontalAdvance(QStringLiteral("n")) / 2, 8);
+	QCOMPARE(metrics.stripInset, expectedSpacing);
+	QCOMPARE(metrics.contentGap, expectedSpacing);
 
 	const QModelIndex idx = findRow(&model, QStringLiteral("Comment Plus 5"));
 	QVERIFY(idx.isValid());
 	const UserStatusGeometry geometry = rowGeometry(view, idx);
-	QCOMPARE(geometry.stripRect.width(), 6 * view.statusIconDimension());
+	QCOMPARE(geometry.stripRect.width(), 6 * metrics.iconTotalDimension);
 }
 
 void TestUserNavigation::iconMetricsTrackRuntimeFontChange() {
@@ -673,6 +837,20 @@ void TestUserNavigation::styleChangeRefreshesIconMetrics() {
 	harness.view.viewport()->removeEventFilter(&counter);
 }
 
+void TestUserNavigation::indentationFollowsFontMetrics() {
+	ViewHarness harness;
+
+	const auto expected = [](const QFont &font) { return qBound(12, QFontMetrics(font).height() + 4, 40); };
+	QCOMPARE(harness.view.indentation(), expected(harness.view.font()));
+
+	QFont larger = harness.view.font();
+	larger.setPointSizeF(larger.pointSizeF() * 2);
+	harness.view.setFont(larger);
+	drainEvents();
+
+	QCOMPARE(harness.view.indentation(), expected(larger));
+}
+
 void TestUserNavigation::narrowWidthShrinksContentAreaByStrip() {
 	ViewHarness harness;
 	harness.view.resize(140, 480);
@@ -684,11 +862,13 @@ void TestUserNavigation::narrowWidthShrinksContentAreaByStrip() {
 	const QRect rowRect = harness.view.visualRect(idx);
 	QVERIFY(!rowRect.isEmpty());
 
-	const int iconCount = 6;
-	const UserStatusGeometry geometry = rowGeometry(harness.view, idx);
-	QCOMPARE(geometry.stripRect.width(), iconCount * harness.view.statusIconDimension());
-	QCOMPARE(geometry.contentRect.width(), rowRect.width() - geometry.stripRect.width());
-	QCOMPARE(geometry.contentRect.right(), geometry.stripRect.left());
+	const UserStatusMetrics metrics      = harness.view.statusMetrics();
+	const int iconCount                  = 6;
+	const UserStatusGeometry geometry    = rowGeometry(harness.view, idx);
+	QCOMPARE(geometry.stripRect.width(), iconCount * metrics.iconTotalDimension);
+	QCOMPARE(geometry.contentRect.width(),
+			 rowRect.width() - geometry.stripRect.width() - metrics.stripInset - metrics.contentGap);
+	QCOMPARE(geometry.contentRect.right() + metrics.contentGap + 1, geometry.stripRect.left());
 
 	// Degenerate narrow case: the row is narrower than the strip itself.
 	// The formula stays consistent (the content width just goes negative),
@@ -699,8 +879,11 @@ void TestUserNavigation::narrowWidthShrinksContentAreaByStrip() {
 
 	const QRect narrowRect = harness.view.visualRect(idx);
 	QVERIFY(!narrowRect.isEmpty());
+	const UserStatusMetrics narrowMetrics   = harness.view.statusMetrics();
 	const UserStatusGeometry narrowGeometry = rowGeometry(harness.view, idx);
-	QCOMPARE(narrowGeometry.contentRect.width(), narrowRect.width() - narrowGeometry.stripRect.width());
+	QCOMPARE(narrowGeometry.contentRect.width(),
+			 narrowRect.width() - narrowGeometry.stripRect.width() - narrowMetrics.stripInset
+				 - narrowMetrics.contentGap);
 }
 
 QTEST_MAIN(TestUserNavigation)
