@@ -845,24 +845,28 @@ void TestUserNavigation::styleChangeRefreshesIconMetrics() {
 	const int dimension = harness.view.statusIconDimension();
 	QCOMPARE(dimension, QFontMetrics(harness.view.font()).height());
 
-	// An actual style change: a genuinely different style, not the same
-	// pointer re-assigned (QWidget::setStyle does not take ownership).
+	// An actual style change: a genuinely different factory key when the
+	// platform has one; a platform that ships only a single style falls back
+	// to a fresh instance of that key - still a new style object on the
+	// widget, not the same pointer re-assigned. QWidget::setStyle does not
+	// take ownership, so the view must be handed back to the application
+	// style before the temporary object dies.
 	const QString currentStyle = harness.view.style()->objectName();
-	QString alternativeStyle;
+	QString styleKey          = currentStyle;
 	for (const QString &key : QStyleFactory::keys()) {
 		if (key.compare(currentStyle, Qt::CaseInsensitive) != 0) {
-			alternativeStyle = key;
+			styleKey = key;
 			break;
 		}
 	}
-	QVERIFY2(!alternativeStyle.isEmpty(), "no alternative style available on this platform");
 
-	{
-		const std::unique_ptr< QStyle > other(QStyleFactory::create(alternativeStyle));
-		QVERIFY(other != nullptr);
-		harness.view.setStyle(other.get());
-		drainEvents();
+	const std::unique_ptr< QStyle > other(QStyleFactory::create(styleKey));
+	if (!other) {
+		QSKIP("QStyleFactory cannot create a style on this platform");
 	}
+
+	harness.view.setStyle(other.get());
+	drainEvents();
 
 	// The real switch must leave the view consistent (no crash, metrics
 	// still derived from the font).
@@ -885,6 +889,14 @@ void TestUserNavigation::styleChangeRefreshesIconMetrics() {
 	drainEvents();
 
 	QVERIFY2(counter.count > settled, "StyleChange did not schedule an icon-metrics refresh");
+	QCOMPARE(harness.view.statusIconDimension(), QFontMetrics(harness.view.font()).height());
+
+	// Restore the application style BEFORE the temporary style object dies:
+	// a pending polish or paint after this slot must not run through the
+	// freed pointer. The application style is owned by QApplication and
+	// outlives the view.
+	harness.view.setStyle(QApplication::style());
+	drainEvents();
 	QCOMPARE(harness.view.statusIconDimension(), QFontMetrics(harness.view.font()).height());
 
 	harness.view.removeEventFilter(&counter);
