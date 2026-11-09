@@ -613,6 +613,14 @@ void MainWindow::updateWindowTitle() {
 	setWindowTitle(title);
 }
 
+bool MainWindow::isConsoleEntryVisible(Log::MsgType mt) const {
+	Q_UNUSED(mt);
+	// Legacy presentation: the combined log dock is the only console
+	// destination. Behavior is byte-identical to the dock visibility test Log
+	// performed directly before this boundary existed.
+	return isActiveWindow() && qdwLog->isVisible();
+}
+
 void MainWindow::updateToolbar() {
 	bool layoutIsCustom = Global::get().s.wlWindowLayout == Settings::LayoutCustom;
 	qtIconToolbar->setMovable(layoutIsCustom && !Global::get().s.bLockLayout);

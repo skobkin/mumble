@@ -151,6 +151,14 @@ public:
 	void focusNextMainWidget();
 	QPair< QByteArray, QImage > openImageFile();
 
+	/// Whether a console entry of the given type is currently visible to the
+	/// user. This is the single presentation boundary used by Log to decide
+	/// notification suppression: the active main window plus the visibility of
+	/// the destination the entry would be appended to. The message type is not
+	/// consulted yet (the combined log is the only destination); Stage 5 routes
+	/// per type through this same query.
+	bool isConsoleEntryVisible(Log::MsgType mt) const;
+
 	void loadState(bool minimalView);
 	void storeState(bool minimalView);
 
