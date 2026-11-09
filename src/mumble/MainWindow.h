@@ -50,6 +50,7 @@ class SearchDialog;
 class MenuLabel;
 class ListenerVolumeSlider;
 class UserLocalVolumeSlider;
+class ConnectionHeader;
 class MainWindowShell;
 class UiStatePersistence;
 
@@ -123,6 +124,10 @@ public:
 	/// setupGui and their pointers are nulled; only the adopted content
 	/// widgets (qtvUsers, qteLog, qteChat) keep living inside the shell.
 	MainWindowShell *m_shell = nullptr;
+
+	/// Connection status strip inside the shell's header container (normal
+	/// mode only). Created during setupGui; owned through the shell.
+	ConnectionHeader *m_header = nullptr;
 
 	/// Fork-side UI persistence policy (sidecar store + guarded restore/capture
 	/// protocol). Owns no widgets; MainWindow translates between it and the
@@ -234,6 +239,11 @@ protected:
 	void createActions();
 	void setupGui();
 	void updateWindowTitle();
+	/// Re-derives the connection snapshot (state, server description, user
+	/// and channel counts) from the live connection state and pushes it to
+	/// the header. Called at the connection lifecycle points; counts are
+	/// resolved at push time, never cached.
+	void updateConnectionHeader();
 	void updateFavoriteButton();
 	void customEvent(QEvent *evt) Q_DECL_OVERRIDE;
 	void findDesiredChannel();

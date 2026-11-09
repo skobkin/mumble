@@ -62,6 +62,7 @@
 #include "Global.h"
 #include "UiStateStore.h"
 #include "UserView.h"
+#include "widgets/ConnectionHeader.h"
 #include "widgets/MainWindowShell.h"
 
 #ifdef Q_OS_WIN
@@ -217,6 +218,12 @@ MainWindow::MainWindow(QWidget *p)
 	// Set up initial client side talking state without the need for the user to do anything.
 	// This will, for example, make sure the correct status tray icon is used on connect.
 	QObject::connect(this, &MainWindow::serverSynchronized, this, &MainWindow::userStateChanged);
+
+	// The connection header's snapshot is refreshed at every connection
+	// lifecycle point (the connected state is pushed from serverConnected()
+	// directly).
+	QObject::connect(this, &MainWindow::serverSynchronized, this, &MainWindow::updateConnectionHeader);
+	QObject::connect(this, &MainWindow::disconnectedFromServer, this, &MainWindow::updateConnectionHeader);
 
 	QObject::connect(this, &MainWindow::channelStateChanged, this, &MainWindow::on_channelStateChanged);
 
@@ -581,6 +588,8 @@ void MainWindow::setupGui() {
 	Q_ASSERT(adoptedTree == qtvUsers);
 
 	m_shell = new MainWindowShell(qtvUsers, qteLog, qteChat, this);
+	m_header = new ConnectionHeader(qaServerConnect, qaServerDisconnect, qaServerInformation, qaSearch);
+	m_shell->setHeaderWidget(m_header);
 	setCentralWidget(m_shell);
 
 	delete qdwLog;
@@ -631,6 +640,10 @@ void MainWindow::setupGui() {
 	setupView(false);
 
 	loadState(isMinimalView());
+
+	// Initial (disconnected) snapshot; lifecycle refreshes follow through the
+	// serverConnected/serverSynchronized/disconnectedFromServer hooks.
+	updateConnectionHeader();
 
 #ifdef Q_OS_MACOS
 	setWindowOpacity(1.0f);
@@ -3575,6 +3588,43 @@ void MainWindow::viewCertificate(bool) {
  * This function prepares the UI for receiving server data. It gets called once the
  * connection to the server is established but before the server Sync is complete.
  */
+void MainWindow::updateConnectionHeader() {
+	if (!m_header) {
+		return;
+	}
+
+	// The tri-state is derived at push time from the live connection state;
+	// nothing is cached between refreshes.
+	ConnectionHeader::ConnectionState state = ConnectionHeader::ConnectionState::Disconnected;
+	std::shared_ptr< ServerHandler > sh      = Global::get().sh;
+	if (Global::get().uiSession != 0) {
+		state = ConnectionHeader::ConnectionState::Synchronized;
+	} else if (sh && sh->isRunning()) {
+		state = ConnectionHeader::ConnectionState::Connecting;
+	}
+
+	// The server description is shown while a connection exists and dropped
+	// with the disconnected snapshot.
+	QString description;
+	if (sh && state != ConnectionHeader::ConnectionState::Disconnected) {
+		QString host, username, password;
+		unsigned short port;
+		sh->getConnectionInfo(host, port, username, password);
+		if (!host.isEmpty()) {
+			description = port != 0 ? QStringLiteral("%1:%2").arg(host).arg(port) : host;
+		}
+	}
+
+	int users = 0;
+	int channels = 0;
+	if (state == ConnectionHeader::ConnectionState::Synchronized) {
+		users    = static_cast< int >(ClientUser::c_qmUsers.size());
+		channels = static_cast< int >(Channel::c_qhChannels.size());
+	}
+
+	m_header->updateConnectionSnapshot(state, description, users, channels);
+}
+
 void MainWindow::serverConnected() {
 	m_reconnectSoundBlocker.reset();
 
@@ -3628,6 +3678,9 @@ void MainWindow::serverConnected() {
 #endif
 
 	m_shell->setNoteVisible(false);
+
+	// uiSession is still 0 here: the header shows the connecting state.
+	updateConnectionHeader();
 }
 
 void MainWindow::serverDisconnected(QAbstractSocket::SocketError err, QString reason) {
