@@ -23,16 +23,25 @@
 /// Qt::DisplayRole) and the font-metrics-derived icon sizes, so that
 /// painting, tooltip handling and click hit-testing all agree on one
 /// calculation instead of each reconstructing an icon layout of their own.
+///
+/// When the row is too narrow to hold every icon, the strip is truncated to
+/// the leading icons that fit (see UserDelegate::computeGeometry);
+/// iconRects then holds fewer entries than the model's icon list.
 struct UserStatusGeometry {
-	/// Bounds of the whole icon strip; invalid when the row has no icons.
+	/// Bounds of the whole icon strip; invalid when the row has no icons (or
+	/// none of them fit).
 	QRect stripRect;
-	/// One rectangle per status icon, in list order (index 0 is the leading
-	/// icon - where the comment indicator sits when present).
+	/// One rectangle per status icon that fits in the row, in list order
+	/// (index 0 is the leading icon - where the comment indicator sits when
+	/// present).
 	QList< QRect > iconRects;
-	/// Bounds of the comment indicator icon; invalid when the row has none.
+	/// Bounds of the comment indicator icon; invalid when the row has none
+	/// or when its slot did not fit.
 	QRect commentIconRect;
 	/// The row rectangle reduced by the icon strip: where the decoration and
-	/// the text are laid out (and what text elision has to fit into).
+	/// the text are laid out (and what text elision has to fit into). Never
+	/// negative: if the strip fills the row up to the content gap, the
+	/// content area clamps to zero width.
 	QRect contentRect;
 };
 
@@ -74,7 +83,10 @@ public:
 	/// has no model, view or Global access, so painting, tooltip forwarding
 	/// and click hit-testing can all use it directly. In right-to-left
 	/// layouts the strip and the content area are mirrored to the visual
-	/// trailing edge (the icons keep their list order).
+	/// trailing edge (the icons keep their list order). If the row is too
+	/// narrow to hold every icon, only the leading icons that fit get
+	/// rectangles - the comment indicator is the leading icon, so it stays
+	/// usable - and the content area never goes negative.
 	static UserStatusGeometry computeGeometry(const QStyleOptionViewItem &option, const QList< QVariant > &statusIcons,
 											  int commentIconIndex, const UserStatusMetrics &metrics);
 

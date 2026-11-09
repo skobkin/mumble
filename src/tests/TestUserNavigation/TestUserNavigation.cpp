@@ -14,7 +14,10 @@
 // reconstruction got wrong); icon metrics and tree indentation track font
 // changes at construction and at runtime; the strip mirrors to the visual
 // trailing edge in right-to-left layouts (geometry, clicks and painted
-// pixels); and the per-row-kind typography/focus refinements render.
+// pixels); rows too narrow for the whole strip truncate it to the leading
+// icons that fit (keeping the comment indicator usable) instead of
+// producing negative content geometry; and the per-row-kind
+// typography/focus refinements render.
 // Server-driven behavior (comments arriving, seen-state, talking state)
 // stays on the live checklist.
 
@@ -132,6 +135,16 @@ public:
 		selfPushToMute->commentIcon  = true;
 		selfPushToMute->selfStyled   = true;
 		selfPushToMute->flagsTooltip = QStringLiteral("Self");
+
+		// A row carrying the maximum realistic simultaneous statuses (the
+		// comment plus twelve others): narrow panes cannot hold the whole
+		// strip, exercising the truncated-overflow geometry.
+		Node *maxStatuses        = addNode(channel, QStringLiteral("Max Statuses"), RowType::User);
+		maxStatuses->statusIcons = { commentStatusIcon() };
+		for (int i = 0; i < 12; ++i)
+			maxStatuses->statusIcons << otherStatusIcon();
+		maxStatuses->commentIcon  = true;
+		maxStatuses->flagsTooltip = QStringLiteral("Max Statuses");
 
 		// Listener proxy: icons may be present (the listening indicator) but
 		// no comment indicator, even though the underlying user has a
@@ -306,6 +319,15 @@ private slots:
 	void styleChangeRefreshesIconMetrics();
 	void indentationFollowsFontMetrics();
 	void narrowWidthShrinksContentAreaByStrip();
+
+	// Rows narrower than their full icon strip: the geometry keeps only the
+	// leading icons that fit and never hands out negative or row-escaping
+	// rectangles - as a pure-geometry matrix (both layout directions, large
+	// icon metrics) and end-to-end at a 180 px pane full of statuses, a
+	// pathological 60 px pane, doubled fonts and RTL (geometry, clicks,
+	// tooltip forwarding and painted pixels).
+	void narrowGeometryKeepsOnlyLeadingIcons();
+	void narrowRowsStayConsistentUnderOverflow();
 
 private:
 	/// Processes events until the view's deferred-work cascades settle (the
@@ -523,7 +545,7 @@ void TestUserNavigation::clickClassificationMatchesPaintedGeometry() {
 							   QStringLiteral("Plain User"),    QStringLiteral("Comment Only"),
 							   QStringLiteral("Comment Plus 1"), QStringLiteral("Comment Plus 3"),
 							   QStringLiteral("Comment Plus 5"), QStringLiteral("Self With Push To Mute"),
-							   QStringLiteral("Listener Proxy") };
+							   QStringLiteral("Max Statuses"),  QStringLiteral("Listener Proxy") };
 
 	for (const QString &name : rows) {
 		const QModelIndex idx = findRow(&harness.model, name);
@@ -919,37 +941,250 @@ void TestUserNavigation::indentationFollowsFontMetrics() {
 
 void TestUserNavigation::narrowWidthShrinksContentAreaByStrip() {
 	ViewHarness harness;
-	harness.view.resize(140, 480);
-	drainEvents();
 
 	const QModelIndex idx = findRow(&harness.model, QStringLiteral("Comment Plus 5"));
 	QVERIFY(idx.isValid());
 
+	// A width where the whole strip still fits (computed from the live
+	// metrics and the row's actual left offset - the fixture rows sit two
+	// indentation levels deep - so the assertion holds for whatever font
+	// the tests run with): the content area shrinks by exactly the strip.
+	const UserStatusMetrics metrics = harness.view.statusMetrics();
+	const int iconCount             = 6;
+	const int rowLeft               = harness.view.visualRect(idx).left();
+	const int fittingWidth          = rowLeft + iconCount * metrics.iconTotalDimension + metrics.stripInset
+									   + metrics.contentGap + 40;
+	harness.view.resize(fittingWidth, 480);
+	drainEvents();
+
 	const QRect rowRect = harness.view.visualRect(idx);
 	QVERIFY(!rowRect.isEmpty());
 
-	const UserStatusMetrics metrics      = harness.view.statusMetrics();
-	const int iconCount                  = 6;
-	const UserStatusGeometry geometry    = rowGeometry(harness.view, idx);
+	const UserStatusGeometry geometry = rowGeometry(harness.view, idx);
 	QCOMPARE(geometry.stripRect.width(), iconCount * metrics.iconTotalDimension);
 	QCOMPARE(geometry.contentRect.width(),
 			 rowRect.width() - geometry.stripRect.width() - metrics.stripInset - metrics.contentGap);
 	QCOMPARE(geometry.contentRect.right() + metrics.contentGap + 1, geometry.stripRect.left());
 
-	// Degenerate narrow case: the row is narrower than the strip itself.
-	// The formula stays consistent (the content width just goes negative),
-	// so text elision input and hit-testing remain derived from the same
-	// rects.
-	harness.view.resize(60, 480);
-	drainEvents();
+	// What happens once the row gets narrower than the strip is the
+	// overflow contract, covered by narrowGeometryKeepsOnlyLeadingIcons and
+	// narrowRowsStayConsistentUnderOverflow below.
+}
 
-	const QRect narrowRect = harness.view.visualRect(idx);
-	QVERIFY(!narrowRect.isEmpty());
-	const UserStatusMetrics narrowMetrics   = harness.view.statusMetrics();
-	const UserStatusGeometry narrowGeometry = rowGeometry(harness.view, idx);
-	QCOMPARE(narrowGeometry.contentRect.width(),
-			 narrowRect.width() - narrowGeometry.stripRect.width() - narrowMetrics.stripInset
-				 - narrowMetrics.contentGap);
+void TestUserNavigation::narrowGeometryKeepsOnlyLeadingIcons() {
+	UserStatusMetrics metrics;
+	metrics.iconTotalDimension = 16;
+	metrics.iconIconPadding    = 1;
+	metrics.iconIconDimension  = 14;
+	metrics.stripInset         = 3;
+	metrics.contentGap         = 3;
+
+	// A large-font metric set: double slot pitch, so far fewer icons fit
+	// into the same widths.
+	UserStatusMetrics largeFont  = metrics;
+	largeFont.iconTotalDimension = 30;
+	largeFont.iconIconDimension  = 28;
+
+	for (const UserStatusMetrics &metricSet : { metrics, largeFont }) {
+		for (const int width : { 8, 20, 36, 60, 100, 180, 300 }) {
+			for (int count = 1; count <= 16; count += (count < 4 ? 1 : 5)) {
+				for (const Qt::LayoutDirection direction : { Qt::LeftToRight, Qt::RightToLeft }) {
+					QVariantList icons;
+					for (int i = 0; i < count; ++i)
+						icons << QVariant(i == 0 ? commentStatusIcon() : otherStatusIcon());
+
+					QStyleOptionViewItem option;
+					option.rect      = QRect(5, 9, width, 30);
+					option.direction = direction;
+
+					const UserStatusGeometry geometry = UserDelegate::computeGeometry(option, icons, 0, metricSet);
+
+					const int expectedVisible =
+						qBound(0, (width - metricSet.stripInset) / metricSet.iconTotalDimension, count);
+
+					// whatever the overflow: no negative or row-escaping rectangle
+					QVERIFY(geometry.contentRect.width() >= 0);
+					QVERIFY(option.rect.contains(geometry.contentRect));
+					QCOMPARE(geometry.iconRects.count(), expectedVisible);
+
+					if (expectedVisible == 0) {
+						// not even one slot fits: icon-less-row behavior
+						QVERIFY(!geometry.stripRect.isValid());
+						QVERIFY(!geometry.commentIconRect.isValid());
+						QCOMPARE(geometry.contentRect, option.rect);
+						continue;
+					}
+
+					QVERIFY(option.rect.contains(geometry.stripRect));
+					QCOMPARE(geometry.stripRect.width(), expectedVisible * metricSet.iconTotalDimension);
+					for (const QRect &iconRect : geometry.iconRects)
+						QVERIFY(option.rect.contains(iconRect));
+
+					// the comment indicator is the leading icon: it survives
+					// every truncation and stays adjacent to the content
+					QVERIFY(geometry.commentIconRect.isValid());
+					QCOMPARE(geometry.commentIconRect, geometry.iconRects.first());
+					if (direction == Qt::LeftToRight) {
+						QCOMPARE(geometry.iconRects.first().left(),
+								 geometry.stripRect.left() + metricSet.iconIconPadding);
+					} else {
+						QCOMPARE(geometry.iconRects.first().right(),
+								 geometry.stripRect.left() + geometry.stripRect.width()
+									 - metricSet.iconTotalDimension + metricSet.iconIconPadding
+									 + metricSet.iconIconDimension - 1);
+					}
+				}
+			}
+		}
+	}
+}
+
+void TestUserNavigation::narrowRowsStayConsistentUnderOverflow() {
+	ViewHarness harness;
+
+	UserDelegate *delegate = qobject_cast< UserDelegate * >(harness.view.itemDelegate());
+	QVERIFY(delegate != nullptr);
+
+	// Two overflowing rows: the maximal 13-icon strip and a 6-icon one, both
+	// with a leading comment indicator.
+	const QStringList rowNames = { QStringLiteral("Max Statuses"), QStringLiteral("Comment Plus 5") };
+	QList< QPair< QModelIndex, int > > rows;
+	for (const QString &name : rowNames) {
+		const QModelIndex idx = findRow(&harness.model, name);
+		QVERIFY2(idx.isValid(), qPrintable(name));
+		const int iconCount = static_cast< int >(idx.sibling(idx.row(), 1).data(Qt::DisplayRole).toList().count());
+		QVERIFY(iconCount > 0);
+		rows.append(qMakePair(idx, iconCount));
+	}
+
+	QSignalSpy clickedSpy(&harness.view, &QAbstractItemView::clicked);
+
+	// Resize to a width that cannot hold the row's full strip (guaranteed
+	// overflow whatever font the tests run under), typically landing on the
+	// requested pane size: 180 px for the many-icon pane, 60 px for the
+	// pathological case.
+	auto resizeOverflowing = [&](int iconCount, int typicalWidth) {
+		const UserStatusMetrics metrics = harness.view.statusMetrics();
+		const int fullStrip             = iconCount * metrics.iconTotalDimension + metrics.stripInset;
+		QVERIFY(fullStrip > 1);
+		harness.view.resize(qMin(fullStrip - 1, qMax(typicalWidth, fullStrip / 2)), 480);
+		drainEvents();
+	};
+
+	// The overflow contract for the row at the view's current state: the
+	// geometry truncates to the icons that fit, stays inside the row, keeps
+	// the comment indicator usable and answers the flags tooltip where the
+	// strip is painted.
+	auto verifyOverflow = [&](const QModelIndex &idx, int iconCount, const char *context) {
+		const QRect rowRect = harness.view.visualRect(idx);
+		QVERIFY2(!rowRect.isEmpty(), context);
+
+		const UserStatusMetrics metrics = harness.view.statusMetrics();
+		const int expectedVisible =
+			qBound(0, (rowRect.width() - metrics.stripInset) / metrics.iconTotalDimension, iconCount);
+		QVERIFY2(expectedVisible < iconCount, "this width does not actually overflow the strip");
+
+		const UserStatusGeometry geometry = rowGeometry(harness.view, idx);
+
+		QVERIFY2(geometry.contentRect.width() >= 0, context);
+		QVERIFY2(rowRect.contains(geometry.contentRect), context);
+		QCOMPARE(geometry.iconRects.count(), expectedVisible);
+		for (const QRect &iconRect : geometry.iconRects)
+			QVERIFY2(rowRect.contains(iconRect), context);
+
+		// the comment indicator survives truncation (it is the leading icon)
+		QVERIFY2(geometry.commentIconRect.isValid(), context);
+		QCOMPARE(geometry.commentIconRect, geometry.iconRects.first());
+		QVERIFY(rowRect.contains(geometry.commentIconRect));
+
+		// and it stays clickable at the truncated geometry
+		clickedSpy.clear();
+		QTest::mouseClick(harness.view.viewport(), Qt::LeftButton, Qt::NoModifier,
+						  geometry.commentIconRect.center());
+		QCOMPARE(clickedSpy.count(), 0);
+
+		// strip pixels still answer the column-1 flags tooltip where the
+		// truncated strip is painted
+		const int queriesBefore = harness.model.columnOneToolTipQueries();
+		QHelpEvent event(QEvent::ToolTip, geometry.stripRect.center(),
+						 harness.view.viewport()->mapToGlobal(geometry.stripRect.center()));
+		QStyleOptionViewItem option;
+		option.rect      = rowRect;
+		option.direction = harness.view.layoutDirection();
+		QVERIFY(delegate->helpEvent(&event, &harness.view, option, idx));
+		QVERIFY(harness.model.columnOneToolTipQueries() > queriesBefore);
+	};
+
+	// Painted evidence: the blue comment icon renders inside its computed
+	// slot and no icon-colored pixel leaves the row band.
+	auto verifyPainted = [&](const QModelIndex &idx, const char *context) {
+		harness.view.selectionModel()->reset();
+		drainEvents();
+
+		const QRect rowRect                = harness.view.visualRect(idx);
+		const UserStatusGeometry geometry  = rowGeometry(harness.view, idx);
+		QVERIFY2(geometry.commentIconRect.isValid(), context);
+
+		const QImage image = harness.view.viewport()->grab().toImage();
+		int bluePixels     = 0;
+		int misplacedBlue  = 0;
+		int outsideRow     = 0;
+		for (int y = rowRect.top(); y <= rowRect.bottom(); ++y) {
+			for (int x = 0; x < image.width(); ++x) {
+				const QColor color(image.pixel(x, y));
+				const bool blue = (color.blueF() > 0.4 && color.blueF() > color.redF() + 0.2
+								   && color.blueF() > color.greenF() + 0.2);
+				const bool red  = (color.redF() > 0.4 && color.redF() > color.blueF() + 0.2
+								   && color.redF() > color.greenF() + 0.2);
+				if (!blue && !red)
+					continue;
+				if (x < rowRect.left() || x > rowRect.right())
+					++outsideRow;
+				if (blue) {
+					++bluePixels;
+					if (x < geometry.commentIconRect.left() - 1 || x > geometry.commentIconRect.right() + 1)
+						++misplacedBlue;
+				}
+			}
+		}
+		QVERIFY2(bluePixels > 0, context);
+		QVERIFY2(outsideRow == 0, context);
+		QVERIFY2(misplacedBlue == 0, context);
+	};
+
+	// 180 px tree pane with many simultaneous status icons
+	for (const auto &row : rows) {
+		resizeOverflowing(row.second, 180);
+		verifyOverflow(row.first, row.second, "180px LTR");
+		verifyPainted(row.first, "180px LTR");
+	}
+
+	// pathological 60 px width
+	for (const auto &row : rows) {
+		resizeOverflowing(row.second, 60);
+		verifyOverflow(row.first, row.second, "60px LTR");
+		verifyPainted(row.first, "60px LTR");
+	}
+
+	// doubled fonts on the 180 px pane
+	QFont larger = harness.view.font();
+	larger.setPointSizeF(larger.pointSizeF() * 2);
+	harness.view.setFont(larger);
+	drainEvents();
+	resizeOverflowing(rows.first().second, 180);
+	verifyOverflow(rows.first().first, rows.first().second, "180px large font");
+	verifyPainted(rows.first().first, "180px large font");
+
+	// right-to-left at both widths
+	harness.view.setFont(QApplication::font());
+	drainEvents();
+	harness.view.setLayoutDirection(Qt::RightToLeft);
+	drainEvents();
+	resizeOverflowing(rows.first().second, 180);
+	verifyOverflow(rows.first().first, rows.first().second, "180px RTL");
+	verifyPainted(rows.first().first, "180px RTL");
+	resizeOverflowing(rows.first().second, 60);
+	verifyOverflow(rows.first().first, rows.first().second, "60px RTL");
 }
 
 QTEST_MAIN(TestUserNavigation)

@@ -36,19 +36,39 @@ UserStatusGeometry UserDelegate::computeGeometry(const QStyleOptionViewItem &opt
 		return geometry;
 	}
 
-	const int stripWidth = iconCount * metrics.iconTotalDimension;
+	// A row can be narrower than the full icon strip (a squeezed tree pane,
+	// large fonts). Rather than pushing the strip past the row edge and
+	// handing Qt style rendering negative content rectangles, keep as many
+	// leading icons as fit and drop the trailing ones: the comment indicator
+	// is the leading icon, so it stays usable while only the icons furthest
+	// from the text are lost. Painting bounds, tooltip regions and click
+	// hit-testing all consume this one result, so a truncated strip stays
+	// consistent across all of them.
+	const int available = option.rect.width() - metrics.stripInset;
+	const int visibleIcons =
+		(metrics.iconTotalDimension > 0) ? qBound(0, available / metrics.iconTotalDimension, iconCount) : 0;
+	if (visibleIcons <= 0) {
+		// Not even one icon slot fits: behave like an icon-less row instead
+		// of painting icons outside the row.
+		geometry.contentRect = option.rect;
+		return geometry;
+	}
+
+	const int stripWidth = visibleIcons * metrics.iconTotalDimension;
 
 	// Logical (left-to-right) layout: the strip occupies the trailing end of
 	// the row, inset from the row edge; the content area keeps a small gap
-	// to the strip.
+	// to the strip. When the strip fills the row up to the gap, the content
+	// width clamps at zero so no consumer ever sees a negative rectangle.
 	QRect strip(option.rect.x() + option.rect.width() - stripWidth - metrics.stripInset, option.rect.y(), stripWidth,
 				option.rect.height());
 	QRect content(option.rect.x(), option.rect.y(),
-				  option.rect.width() - stripWidth - metrics.stripInset - metrics.contentGap, option.rect.height());
+				  qMax(0, option.rect.width() - stripWidth - metrics.stripInset - metrics.contentGap),
+				  option.rect.height());
 
 	const int iconPosY = (option.rect.height() / 2) - (metrics.iconIconDimension / 2);
-	geometry.iconRects.reserve(iconCount);
-	for (int i = 0; i < iconCount; ++i) {
+	geometry.iconRects.reserve(visibleIcons);
+	for (int i = 0; i < visibleIcons; ++i) {
 		QRect iconRect = strip;
 		iconRect.setSize(QSize(metrics.iconIconDimension, metrics.iconIconDimension));
 		iconRect.translate(i * metrics.iconTotalDimension + metrics.iconIconPadding, iconPosY);
@@ -62,7 +82,7 @@ UserStatusGeometry UserDelegate::computeGeometry(const QStyleOptionViewItem &opt
 	if (option.direction == Qt::RightToLeft) {
 		strip   = QStyle::visualRect(option.direction, option.rect, strip);
 		content = QStyle::visualRect(option.direction, option.rect, content);
-		for (int i = 0; i < iconCount; ++i) {
+		for (int i = 0; i < visibleIcons; ++i) {
 			QRect &iconRect = geometry.iconRects[i];
 			iconRect.moveLeft(strip.left() + strip.width() - (i + 1) * metrics.iconTotalDimension
 							  + metrics.iconIconPadding);
@@ -72,7 +92,7 @@ UserStatusGeometry UserDelegate::computeGeometry(const QStyleOptionViewItem &opt
 	geometry.stripRect   = strip;
 	geometry.contentRect = content;
 
-	if (commentIconIndex >= 0 && commentIconIndex < iconCount) {
+	if (commentIconIndex >= 0 && commentIconIndex < visibleIcons) {
 		geometry.commentIconRect = geometry.iconRects.at(commentIconIndex);
 	}
 
@@ -187,8 +207,10 @@ void UserDelegate::paint(QPainter *painter, const QStyleOptionViewItem &option, 
 	style->drawItemText(painter, textRect, static_cast< int >(o.displayAlignment), o.palette, true, itemText,
 						colorRole);
 
-	// draw the status icons at the shared geometry's positions
-	for (int i = 0; i < ql.size(); ++i) {
+	// draw the status icons at the shared geometry's positions. When the row
+	// is too narrow for the whole strip, the geometry keeps only the leading
+	// icons - painting follows it, so icons never render outside their row.
+	for (int i = 0; i < geometry.iconRects.count(); ++i) {
 		qvariant_cast< QIcon >(ql[i]).paint(painter, geometry.iconRects.at(i), o.decorationAlignment, iconMode,
 											QIcon::On);
 	}
