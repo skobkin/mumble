@@ -61,6 +61,25 @@ QIcon otherStatusIcon() {
 	return QIcon(pixmap);
 }
 
+// QWidget::setStyle does not take ownership. When a test installs a style
+// owned by a local unique_ptr, this guard hands the widget back to the
+// application style on destruction: a failed QVERIFY returns from the test
+// slot, and without the guard the unique_ptr would then free the style the
+// widget still points at (destruction walks it via unpolish). Declare it
+// after the unique_ptr so it destructs first. The application style is
+// owned by QApplication and outlives every widget.
+class ApplicationStyleRestore {
+public:
+	explicit ApplicationStyleRestore(QWidget *widget) : m_widget(widget) {}
+	~ApplicationStyleRestore() { m_widget->setStyle(QApplication::style()); }
+
+	ApplicationStyleRestore(const ApplicationStyleRestore &)            = delete;
+	ApplicationStyleRestore &operator=(const ApplicationStyleRestore &) = delete;
+
+private:
+	QWidget *m_widget;
+};
+
 // Synthetic stand-in mirroring the UserModel presentation protocol the
 // UserView/UserDelegate pair consumes:
 //  - columnCount() == 1, but index() also accepts column 1 (exactly like
@@ -888,6 +907,10 @@ void TestUserNavigation::styleChangeRefreshesIconMetrics() {
 	}
 
 	harness.view.setStyle(other.get());
+	// A failed QVERIFY below returns from this slot; the guard restores the
+	// application style even then, before `other` (declared above it, so
+	// destructed after it) frees the style object.
+	const ApplicationStyleRestore restoreAppStyle(&harness.view);
 	drainEvents();
 
 	// The real switch must leave the view consistent (no crash, metrics
@@ -913,10 +936,9 @@ void TestUserNavigation::styleChangeRefreshesIconMetrics() {
 	QVERIFY2(counter.count > settled, "StyleChange did not schedule an icon-metrics refresh");
 	QCOMPARE(harness.view.statusIconDimension(), QFontMetrics(harness.view.font()).height());
 
-	// Restore the application style BEFORE the temporary style object dies:
-	// a pending polish or paint after this slot must not run through the
-	// freed pointer. The application style is owned by QApplication and
-	// outlives the view.
+	// Restore the application style before the temporary style object dies
+	// (a failing QVERIFY above leaves it to the guard): a pending polish or
+	// paint after this slot must not run through the freed pointer.
 	harness.view.setStyle(QApplication::style());
 	drainEvents();
 	QCOMPARE(harness.view.statusIconDimension(), QFontMetrics(harness.view.font()).height());
