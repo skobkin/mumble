@@ -37,19 +37,22 @@ UserStatusGeometry UserDelegate::computeGeometry(const QStyleOptionViewItem &opt
 	}
 
 	// A row can be narrower than the full icon strip (a squeezed tree pane,
-	// large fonts). Rather than pushing the strip past the row edge and
-	// handing Qt style rendering negative content rectangles, keep as many
-	// leading icons as fit and drop the trailing ones: the comment indicator
-	// is the leading icon, so it stays usable while only the icons furthest
-	// from the text are lost. Painting bounds, tooltip regions and click
-	// hit-testing all consume this one result, so a truncated strip stays
-	// consistent across all of them.
-	const int available = option.rect.width() - metrics.stripInset;
+	// large fonts). The row's identity - decoration and elided name -
+	// outranks the low-priority trailing status icons: keep at least
+	// minContentWidth of content area and drop trailing icons first, so Qt
+	// style rendering never sees a starved content rectangle. The comment
+	// indicator is the leading icon, so it survives every such truncation.
+	// Painting bounds, tooltip regions and click hit-testing all consume
+	// this one result, so a truncated strip stays consistent across all of
+	// them.
+	const int availableForStrip =
+		option.rect.width() - metrics.stripInset - metrics.contentGap - metrics.minContentWidth;
 	const int visibleIcons =
-		(metrics.iconTotalDimension > 0) ? qBound(0, available / metrics.iconTotalDimension, iconCount) : 0;
+		(metrics.iconTotalDimension > 0) ? qBound(0, availableForStrip / metrics.iconTotalDimension, iconCount) : 0;
 	if (visibleIcons <= 0) {
-		// Not even one icon slot fits: behave like an icon-less row instead
-		// of painting icons outside the row.
+		// Not even one icon slot fits next to the minimum content area:
+		// behave like an icon-less row instead of painting icons outside the
+		// row or starving the name.
 		geometry.contentRect = option.rect;
 		return geometry;
 	}
@@ -58,8 +61,9 @@ UserStatusGeometry UserDelegate::computeGeometry(const QStyleOptionViewItem &opt
 
 	// Logical (left-to-right) layout: the strip occupies the trailing end of
 	// the row, inset from the row edge; the content area keeps a small gap
-	// to the strip. When the strip fills the row up to the gap, the content
-	// width clamps at zero so no consumer ever sees a negative rectangle.
+	// to the strip. With a content reserve, visibleIcons above is chosen so
+	// the content keeps at least that width; the clamp guards metrics
+	// without a reserve so no consumer ever sees a negative rectangle.
 	QRect strip(option.rect.x() + option.rect.width() - stripWidth - metrics.stripInset, option.rect.y(), stripWidth,
 				option.rect.height());
 	QRect content(option.rect.x(), option.rect.y(),
@@ -195,17 +199,22 @@ void UserDelegate::paint(QPainter *painter, const QStyleOptionViewItem &option, 
 	const bool hasFocus  = o.state & QStyle::State_HasFocus;
 	const QRect focusRect = hasFocus ? style->subElementRect(QStyle::SE_ItemViewItemFocusRect, &o, o.widget) : QRect();
 
-	// draw icon
-	o.rect                = geometry.contentRect;
-	QRect decorationRect = style->subElementRect(QStyle::SE_ItemViewItemDecoration, &o, o.widget);
-	o.icon.paint(painter, decorationRect, o.decorationAlignment, iconMode, QIcon::On);
+	// Draw the decoration and the text into the content area - but only when
+	// it is usable: a degenerate row with no width left for the row's
+	// identity must not hand Qt style rendering an empty rectangle.
+	if (geometry.contentRect.width() > 0) {
+		// draw icon
+		o.rect                = geometry.contentRect;
+		QRect decorationRect = style->subElementRect(QStyle::SE_ItemViewItemDecoration, &o, o.widget);
+		o.icon.paint(painter, decorationRect, o.decorationAlignment, iconMode, QIcon::On);
 
-	// draw text
-	QRect textRect   = style->subElementRect(QStyle::SE_ItemViewItemText, &o, o.widget);
-	QString itemText = o.fontMetrics.elidedText(o.text, o.textElideMode, textRect.width());
-	painter->setFont(o.font);
-	style->drawItemText(painter, textRect, static_cast< int >(o.displayAlignment), o.palette, true, itemText,
-						colorRole);
+		// draw text
+		QRect textRect   = style->subElementRect(QStyle::SE_ItemViewItemText, &o, o.widget);
+		QString itemText = o.fontMetrics.elidedText(o.text, o.textElideMode, textRect.width());
+		painter->setFont(o.font);
+		style->drawItemText(painter, textRect, static_cast< int >(o.displayAlignment), o.palette, true, itemText,
+							colorRole);
+	}
 
 	// draw the status icons at the shared geometry's positions. When the row
 	// is too narrow for the whole strip, the geometry keeps only the leading
@@ -281,6 +290,13 @@ void UserView::adjustIcons() {
 	const int spacing          = qBound(2, fontMetrics.horizontalAdvance(QStringLiteral("n")) / 2, 8);
 	metrics.stripInset         = spacing;
 	metrics.contentGap         = spacing;
+
+	// Identity outranks status icons: keep room for the decoration (about
+	// one icon slot) plus an ellipsis, so an elided name stays readable when
+	// the row overflows. Clamped so pathological fonts cannot claim the
+	// whole row.
+	metrics.minContentWidth =
+		qBound(20, metrics.iconTotalDimension + fontMetrics.horizontalAdvance(QStringLiteral("...")), 120);
 
 	m_iconMetrics = metrics;
 	m_userDelegate->adjustIcons(metrics);

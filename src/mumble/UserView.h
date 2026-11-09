@@ -40,8 +40,10 @@ struct UserStatusGeometry {
 	QRect commentIconRect;
 	/// The row rectangle reduced by the icon strip: where the decoration and
 	/// the text are laid out (and what text elision has to fit into). Never
-	/// negative: if the strip fills the row up to the content gap, the
-	/// content area clamps to zero width.
+	/// negative, and whenever status icons are shown at least
+	/// UserStatusMetrics::minContentWidth wide (trailing icons are dropped
+	/// first); the full row when no icon fits. Only a degenerate zero-width
+	/// row can leave it empty.
 	QRect contentRect;
 };
 
@@ -61,6 +63,11 @@ struct UserStatusMetrics {
 	int stripInset         = 0;
 	/// Gap between the content area and the strip.
 	int contentGap         = 0;
+	/// Minimum content width reserved for the decoration and an elided
+	/// name. Trailing status icons are dropped before the content area
+	/// shrinks below this (0 disables the reserve): a row's identity
+	/// outranks its low-priority status icons.
+	int minContentWidth    = 0;
 };
 
 class UserDelegate : public QStyledItemDelegate {
@@ -84,9 +91,12 @@ public:
 	/// and click hit-testing can all use it directly. In right-to-left
 	/// layouts the strip and the content area are mirrored to the visual
 	/// trailing edge (the icons keep their list order). If the row is too
-	/// narrow to hold every icon, only the leading icons that fit get
-	/// rectangles - the comment indicator is the leading icon, so it stays
-	/// usable - and the content area never goes negative.
+	/// narrow to hold every icon next to the reserved minimum content area
+	/// (see UserStatusMetrics::minContentWidth), trailing icons are dropped
+	/// until it is - the comment indicator is the leading icon, so it stays
+	/// usable as long as any icon fits - and if not even one icon slot fits
+	/// next to the minimum content, the row behaves like an icon-less row
+	/// (full-width content, empty strip).
 	static UserStatusGeometry computeGeometry(const QStyleOptionViewItem &option, const QList< QVariant > &statusIcons,
 											  int commentIconIndex, const UserStatusMetrics &metrics);
 
