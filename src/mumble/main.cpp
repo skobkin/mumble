@@ -41,6 +41,7 @@
 #include "PluginInstaller.h"
 #include "PluginManager.h"
 #include "QtWidgetUtils.h"
+#include "RestartArguments.h"
 #include "SSL.h"
 #include "SocketRPC.h"
 #include "TalkingUI.h"
@@ -946,6 +947,42 @@ int main(int argc, char **argv) {
 		}
 	}
 
+	// Snapshot everything the restart relaunch (further below) needs before the
+	// teardown destroys Global: the resolved profile path from the live
+	// Settings (settingsLocation is the effective primary write target with a
+	// trailing ".back" already trimmed by Settings::load) and the CLI-derived
+	// runtime values from the parsed options. The restart block runs after
+	// "delete Global::g_global_struct" and must not touch Global.
+	RestartOptions restartOptions;
+	restartOptions.allowMultiple            = options.allowMultiple;
+	restartOptions.suppressIdentity         = options.suppressIdentity;
+	restartOptions.noWindowStates           = options.noWindowStates;
+	restartOptions.dumpInputStreams         = options.dumpInputStreams;
+	restartOptions.printEchoCancelQueue     = options.printEchoCancelQueue;
+	restartOptions.skipSettingsBackupPrompt = options.skipSettingsBackupPrompt;
+	if (options.jackClientName) {
+		restartOptions.jackClientName = QString::fromStdString(*options.jackClientName);
+	}
+	if (options.windowTitleExt) {
+		restartOptions.windowTitleExt = QString::fromStdString(*options.windowTitleExt);
+	}
+	if (options.defaultCertDir) {
+		// Absolutized so the relaunched process does not depend on inheriting
+		// the current working directory.
+		restartOptions.defaultCertificateDir =
+			QFileInfo(QString::fromStdString(*options.defaultCertDir)).absoluteFilePath();
+	}
+	if (options.translationDir) {
+		restartOptions.translationDir = QFileInfo(QString::fromStdString(*options.translationDir)).absoluteFilePath();
+	}
+	if (!settingsFile.isEmpty()) {
+		// An explicit --config was actually used (unusable ones make Mumble
+		// exit with an error at startup), so replay the resolved primary path
+		// instead of silently falling back to the default profile.
+		restartOptions.configPath = QFileInfo(Global::get().s.settingsLocation).absoluteFilePath();
+	}
+	restartOptions.reconnectUrl = url.toString();
+
 	prepareLogForShutdown();
 
 	QCoreApplication::processEvents();
@@ -1020,16 +1057,7 @@ int main(int argc, char **argv) {
 	// Until we invest the time to verify this, rather be safe (and a bit slower)
 	// than sorry (and crash/bug out). Also take care to reconnect if possible.
 	if (res == MUMBLE_EXIT_CODE_RESTART) {
-		QStringList arguments;
-
-		if (options.allowMultiple)
-			arguments << QLatin1String("--multiple");
-		if (options.suppressIdentity)
-			arguments << QLatin1String("--no-identity");
-		if (options.jackClientName)
-			arguments << QLatin1String("--jack-name ") + Global::get().s.qsJackClientName;
-		if (!url.isEmpty())
-			arguments << url.toString();
+		const QStringList arguments = buildRestartArguments(restartOptions);
 
 		qWarning() << "Triggering restart of Mumble with arguments: " << arguments;
 
@@ -1041,7 +1069,7 @@ int main(int argc, char **argv) {
 		// rights but only the right token on launch. Here we use ShellExecuteEx
 		// which handles this transparently for us.
 		const std::wstring applicationFilePath = qApp->applicationFilePath().toStdWString();
-		const std::wstring argumentsString     = arguments.join(QLatin1String(" ")).toStdWString();
+		const std::wstring argumentsString     = toWindowsArgumentString(arguments).toStdWString();
 
 		SHELLEXECUTEINFO si;
 		ZeroMemory(&si, sizeof(SHELLEXECUTEINFO));

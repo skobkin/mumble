@@ -212,6 +212,8 @@ set(MUMBLE_SOURCES
 	"PTTButtonWidget.ui"
 	"QtWidgetUtils.cpp"
 	"QtWidgetUtils.h"
+	"RestartArguments.cpp"
+	"RestartArguments.h"
 	"RichTextEditor.cpp"
 	"RichTextEditor.h"
 	"RichTextEditorLink.ui"
