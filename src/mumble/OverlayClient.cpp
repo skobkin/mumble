@@ -208,7 +208,7 @@ void OverlayClient::showGui() {
 	bWasVisible = !Global::get().mw->isHidden();
 
 	if (bWasVisible) {
-		Global::get().mw->storeState(Global::get().s.bMinimalView);
+		Global::get().mw->storeState(Global::get().mw->isMinimalView());
 	}
 
 	{
@@ -310,7 +310,7 @@ void OverlayClient::hideGui() {
 	}
 
 	if (bWasVisible) {
-		Global::get().mw->loadState(Global::get().s.bMinimalView);
+		Global::get().mw->loadState(Global::get().mw->isMinimalView());
 	}
 
 #ifdef Q_OS_MAC

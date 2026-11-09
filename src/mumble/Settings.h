@@ -590,10 +590,25 @@ struct Settings {
 
 	void migratePluginSettings(const MigratedPath &path);
 
+	/// Resolves the primary settings file location the parameterless save()
+	/// will use: the first existing and writable candidate from the standard
+	/// search paths, or the default location when none exists. Exposed so the
+	/// new-UI sidecar persistence (new-UI architecture 5.4) can pin and use
+	/// exactly the same write target as shared settings saving.
+	QString findSettingsLocation(bool legacy = false, bool *foundExistingFile = nullptr) const;
+
 private:
 	void verifySettingsKeys() const;
-	QString findSettingsLocation(bool legacy = false, bool *foundExistingFile = nullptr) const;
 };
+
+/// Applies an accepted configuration candidate to \p current while preserving
+/// the official client's protected window preferences (new-UI architecture
+/// 5.3): the nine window-layout fields below are always taken from \p current,
+/// so no configuration acceptance path (Apply, OK, Reset, Restore Defaults,
+/// Defaults for all) can change what the official client restores. This is the
+/// single production seam used by ConfigDialog::apply(); tests exercise it
+/// directly.
+void commitAcceptedSettings(Settings &candidate, Settings &current);
 
 QDataStream &operator<<(QDataStream &qds, const ChannelTarget &target);
 QDataStream &operator>>(QDataStream &qds, ChannelTarget &target);

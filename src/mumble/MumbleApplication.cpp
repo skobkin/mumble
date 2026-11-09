@@ -37,6 +37,10 @@ void MumbleApplication::onCommitDataRequest(QSessionManager &) {
 	// Make sure the config is saved and suppress the ask on quit message
 	if (Global::get().mw) {
 		Global::get().s.mumbleQuitNormally = true;
+		// Capture the fork's window state into its sidecar before the shared
+		// settings are written; the policy skips unusable captures (overlay
+		// proxy) itself and the shared window fields are never touched.
+		Global::get().mw->storeState(Global::get().mw->isMinimalView());
 		Global::get().s.save();
 		Global::get().mw->forceQuit = true;
 		qWarning() << "Session likely ending. Suppressing ask on quit";

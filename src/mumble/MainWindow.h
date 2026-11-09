@@ -50,6 +50,8 @@ class SearchDialog;
 class MenuLabel;
 class ListenerVolumeSlider;
 class UserLocalVolumeSlider;
+class MainWindowShell;
+class UiStatePersistence;
 
 struct ShortcutTarget;
 
@@ -116,7 +118,16 @@ public:
 	GlobalShortcut *gsCycleListenerAttenuationMode, *gsListenerAttenuationUp, *gsListenerAttenuationDown;
 	GlobalShortcut *gsAdaptivePush;
 
-	DockTitleBar *dtbLogDockTitle, *dtbChatDockTitle;
+	/// The redesigned central-widget shell owning the presentation layout.
+	/// The dock members qdwLog/qdwChat/qdwMinimalViewNote are deleted during
+	/// setupGui and their pointers are nulled; only the adopted content
+	/// widgets (qtvUsers, qteLog, qteChat) keep living inside the shell.
+	MainWindowShell *m_shell = nullptr;
+
+	/// Fork-side UI persistence policy (sidecar store + guarded restore/capture
+	/// protocol). Owns no widgets; MainWindow translates between it and the
+	/// shell. Null until setupGui.
+	std::unique_ptr< UiStatePersistence > m_uiStatePersistence;
 
 	ACLEditor *aclEdit;
 	BanEditor *banEdit;
@@ -145,7 +156,6 @@ public:
 	void recheckTTS();
 	void msgBox(QString msg);
 	void setOnTop(bool top);
-	void setShowDockTitleBars(bool doShow);
 	void updateAudioToolTips();
 	void updateUserModel();
 	void focusNextMainWidget();
@@ -158,6 +168,13 @@ public:
 	/// consulted yet (the combined log is the only destination); Stage 5 routes
 	/// per type through this same query.
 	bool isConsoleEntryVisible(Log::MsgType mt) const;
+
+	/// Current minimal-view mode of the fork's window presentation. This is the
+	/// single source of truth for code outside MainWindow (e.g. the overlay);
+	/// the shared Settings field is never written by the fork.
+	bool isMinimalView() const;
+	/// Current frameless (hide-frame) mode of the fork's window presentation.
+	bool isHideFrame() const;
 
 	void loadState(bool minimalView);
 	void storeState(bool minimalView);
@@ -214,17 +231,9 @@ protected:
 	std::stack< unsigned int > m_previousChannels;
 	std::optional< unsigned int > m_movedBackFromChannel;
 
-	static constexpr int stateVersion();
-
 	void createActions();
 	void setupGui();
 	void updateWindowTitle();
-	/// updateToolbar updates the state of the toolbar depending on the current
-	/// window layout setting.
-	/// If the window layout setting is 'custom', the toolbar is made movable. If the
-	/// window layout is not 'custom', the toolbar is locked in place at the top of
-	/// the MainWindow.
-	void updateToolbar();
 	void updateFavoriteButton();
 	void customEvent(QEvent *evt) Q_DECL_OVERRIDE;
 	void findDesiredChannel();
@@ -480,6 +489,12 @@ public:
 	void selfRegister();
 	void openAudioStatsDialog();
 	void openConfigDialog();
+	/// Resets the fork's window presentation to factory defaults: normal mode,
+	/// framed, default splitter sizes and a centered default window rectangle.
+	/// Releases the sidecar's restore latch in the same write so an interrupted
+	/// restoration can never keep blocking starts. The shared settings file is
+	/// not touched.
+	void resetUiStateLayout();
 	void openAudioWizardDialog();
 	void openCertWizardDialog();
 	void enableAudioTTS(bool enable);

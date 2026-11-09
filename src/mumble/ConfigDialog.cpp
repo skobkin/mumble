@@ -9,6 +9,7 @@
 #include "AudioOutput.h"
 #include "widgets/EventFilters.h"
 #include "Global.h"
+#include "Settings.h"
 
 #include <QScrollArea>
 #include <QtCore/QMutexLocker>
@@ -278,7 +279,12 @@ void ConfigDialog::apply() {
 		cw->save();
 	}
 
-	Global::get().s = s;
+	// The production protection seam (new-UI architecture 5.3): the nine
+	// shared window-state fields the fork never owns are carried over from the
+	// current settings inside the same atomic commit that installs the
+	// candidate. Every path into here (Apply, OK, Reset, Restore Defaults,
+	// Defaults-All) is covered by this single call.
+	commitAcceptedSettings(s, Global::get().s);
 
 	for (ConfigWidget *cw : qmWidgets) {
 		cw->accept();

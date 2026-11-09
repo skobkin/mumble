@@ -1308,3 +1308,22 @@ QString Settings::findSettingsLocation(bool legacy, bool *foundExistingFile) con
 
 	return chosenPath;
 }
+
+void commitAcceptedSettings(Settings &candidate, Settings &current) {
+	// The fork's redesigned shell persists its layout exclusively in its own
+	// sidecar file (UiStateStore). These nine shared fields belong to the
+	// official client's window presentation and must never be changed by any
+	// configuration acceptance path in the fork, no matter what a dialog
+	// candidate carries (see docs/new-ui/architecture.md 5.3).
+	candidate.qbaMainWindowGeometry  = current.qbaMainWindowGeometry;
+	candidate.qbaMainWindowState     = current.qbaMainWindowState;
+	candidate.qbaMinimalViewGeometry = current.qbaMinimalViewGeometry;
+	candidate.qbaMinimalViewState    = current.qbaMinimalViewState;
+	candidate.preventWindowStates    = current.preventWindowStates;
+	candidate.bMinimalView           = current.bMinimalView;
+	candidate.bHideFrame             = current.bHideFrame;
+	candidate.wlWindowLayout         = current.wlWindowLayout;
+	candidate.bLockLayout            = current.bLockLayout;
+
+	current = candidate;
+}

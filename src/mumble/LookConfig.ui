@@ -439,6 +439,16 @@
         </property>
        </spacer>
       </item>
+      <item row="2" column="0" colspan="9">
+       <widget class="QPushButton" name="qpbResetNewUiLayout">
+        <property name="toolTip">
+         <string>Reset the window layout of the redesigned UI to its defaults (window size, position, splitter sizes and view mode). The layout of the standard Mumble client is not affected.</string>
+        </property>
+        <property name="text">
+         <string>Reset window layout...</string>
+        </property>
+       </widget>
+      </item>
      </layout>
     </widget>
    </item>

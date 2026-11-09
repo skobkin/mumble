@@ -72,9 +72,31 @@ LookConfig::LookConfig(Settings &st) : ConfigWidget(st) {
 	qcbUserDrag->insertItem(Settings::DoNothing, tr("Do Nothing"), Settings::DoNothing);
 	qcbUserDrag->insertItem(Settings::Move, tr("Move"), Settings::Move);
 
-	connect(qrbLCustom, SIGNAL(toggled(bool)), qcbLockLayout, SLOT(setEnabled(bool)));
 	connect(qbClearBackgroundColor, &QPushButton::clicked, this, &LookConfig::talkinguiBackgroundCleared);
 	connect(qbBackgroundColor, &QPushButton::clicked, this, &LookConfig::qbBackgroundColor_clicked);
+
+	// The redesigned window presentation owns the window layout, minimal view,
+	// frame mode and layout locking. The legacy controls stay visible (they
+	// still display the official client's stored values) but are read-only for
+	// the fork; the fork's own layout is reset explicitly instead.
+	const QString managedTooltip =
+		tr("This setting is managed by the redesigned window layout and cannot be changed here");
+	qrbLClassic->setDisabled(true);
+	qrbLClassic->setToolTip(managedTooltip);
+	qrbLStacked->setDisabled(true);
+	qrbLStacked->setToolTip(managedTooltip);
+	qrbLHybrid->setDisabled(true);
+	qrbLHybrid->setToolTip(managedTooltip);
+	qrbLCustom->setDisabled(true);
+	qrbLCustom->setToolTip(managedTooltip);
+	qcbLockLayout->setDisabled(true);
+	qcbLockLayout->setToolTip(managedTooltip);
+	qcbRestoreWindowState->setDisabled(true);
+	qcbRestoreWindowState->setToolTip(managedTooltip);
+
+	// Explicit reset of the fork's own layout (immediate, not Apply-deferred).
+	connect(qpbResetNewUiLayout, &QPushButton::clicked, this,
+			[]() { Global::get().mw->resetUiStateLayout(); });
 
 	connect(qlLAutoTheme, &ClickableLabel::clicked, this, [this]() { qrbAutoStyle->setChecked(true); });
 	connect(qlLDarkTheme, &ClickableLabel::clicked, this, [this]() { qrbDarkStyle->setChecked(true); });
@@ -196,7 +218,9 @@ void LookConfig::load(const Settings &r) {
 	loadComboBox(qcbUserDrag, 0);
 
 	setStyleType(r.styleType);
-	// Load Layout checkbox state
+	// Load Layout radiobox state (display only: the layout controls are
+	// read-only for the redesigned presentation and the candidate settings are
+	// never written from here)
 	switch (r.wlWindowLayout) {
 		case Settings::LayoutClassic:
 			qrbLClassic->setChecked(true);
@@ -209,11 +233,9 @@ void LookConfig::load(const Settings &r) {
 			break;
 		case Settings::LayoutCustom:
 		default:
-			s.wlWindowLayout = Settings::LayoutCustom;
 			qrbLCustom->setChecked(true);
 			break;
 	}
-	qcbLockLayout->setEnabled(r.wlWindowLayout == Settings::LayoutCustom);
 
 
 	for (int i = 0; i < qcbLanguage->count(); i++) {
@@ -286,16 +308,11 @@ void LookConfig::save() const {
 		s.requireRestartToApply = true;
 	}
 
-	// Save Layout radioboxes state
-	if (qrbLClassic->isChecked()) {
-		s.wlWindowLayout = Settings::LayoutClassic;
-	} else if (qrbLStacked->isChecked()) {
-		s.wlWindowLayout = Settings::LayoutStacked;
-	} else if (qrbLHybrid->isChecked()) {
-		s.wlWindowLayout = Settings::LayoutHybrid;
-	} else {
-		s.wlWindowLayout = Settings::LayoutCustom;
-	}
+	// Note: the window layout (wlWindowLayout), layout locking (bLockLayout)
+	// and the window-state restore latch (preventWindowStates) are deliberately
+	// not saved: they are owned by the shared settings the official client
+	// manages and protected by commitAcceptedSettings(); their controls are
+	// read-only in the redesigned UI.
 
 	s.ceExpand      = static_cast< Settings::ChannelExpand >(qcbExpand->currentIndex());
 	s.ceChannelDrag = static_cast< Settings::ChannelDrag >(qcbChannelDrag->currentIndex());
@@ -309,8 +326,6 @@ void LookConfig::save() const {
 	s.aotbAlwaysOnTop           = static_cast< Settings::AlwaysOnTopBehaviour >(qcbAlwaysOnTop->currentIndex());
 	s.quitBehavior              = static_cast< QuitBehavior >(qcbQuitBehavior->currentIndex());
 	s.bEnableDeveloperMenu      = qcbEnableDeveloperMenu->isChecked();
-	s.bLockLayout               = qcbLockLayout->isChecked();
-	s.preventWindowStates       = !qcbRestoreWindowState->isChecked();
 	s.bHideInTray               = qcbHideTray->isChecked();
 	s.bStateInTray              = qcbStateInTray->isChecked();
 	s.bShowUserCount            = qcbShowUserCount->isChecked();
@@ -361,11 +376,6 @@ void LookConfig::save() const {
 	s.searchUserAction = static_cast< Search::SearchDialog::UserAction >(qcbSearchUserAction->currentData().toInt());
 	s.searchChannelAction =
 		static_cast< Search::SearchDialog::ChannelAction >(qcbSearchChannelAction->currentData().toInt());
-}
-
-void LookConfig::accept() const {
-	Global::get().mw->setShowDockTitleBars((Global::get().s.wlWindowLayout == Settings::LayoutCustom)
-										   && !Global::get().s.bLockLayout);
 }
 
 StyleType LookConfig::getStyleType() const {

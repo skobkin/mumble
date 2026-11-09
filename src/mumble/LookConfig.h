@@ -33,7 +33,6 @@ public:
 	virtual QIcon icon() const Q_DECL_OVERRIDE;
 
 public slots:
-	void accept() const Q_DECL_OVERRIDE;
 	void save() const Q_DECL_OVERRIDE;
 	void load(const Settings &r) Q_DECL_OVERRIDE;
 	void talkinguiBackgroundSet(QColor color);

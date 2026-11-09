@@ -54,11 +54,15 @@
 #include "UserLocalNicknameDialog.h"
 #include "UserLocalVolumeSlider.h"
 #include "UserModel.h"
+#include "UiStatePersistence.h"
 #include "Utils.h"
 #include "VersionCheck.h"
 #include "ViewCert.h"
 #include "VoiceRecorderDialog.h"
 #include "Global.h"
+#include "UiStateStore.h"
+#include "UserView.h"
+#include "widgets/MainWindowShell.h"
 
 #ifdef Q_OS_WIN
 #	include "TaskList.h"
@@ -201,9 +205,11 @@ MainWindow::MainWindow(QWidget *p)
 	qmDeveloper->addAction(qaDeveloperConsole);
 	qmDeveloper->addAction(qaPositionalAudioViewer);
 
+	// setupGui() has initialized the fork's UI persistence policy by now, so
+	// the mode reads come from the fork state, not the shared settings.
 	setOnTop(Global::get().s.aotbAlwaysOnTop == Settings::OnTopAlways
-			 || (Global::get().s.bMinimalView && Global::get().s.aotbAlwaysOnTop == Settings::OnTopInMinimal)
-			 || (!Global::get().s.bMinimalView && Global::get().s.aotbAlwaysOnTop == Settings::OnTopInNormal));
+			 || (isMinimalView() && Global::get().s.aotbAlwaysOnTop == Settings::OnTopInMinimal)
+			 || (!isMinimalView() && Global::get().s.aotbAlwaysOnTop == Settings::OnTopInNormal));
 
 	QObject::connect(this, &MainWindow::serverSynchronized, Global::get().pluginManager,
 					 &PluginManager::on_serverSynchronized);
@@ -215,13 +221,6 @@ MainWindow::MainWindow(QWidget *p)
 	QObject::connect(this, &MainWindow::channelStateChanged, this, &MainWindow::on_channelStateChanged);
 
 	QAccessible::installFactory(AccessibleSlider::semanticSliderFactory);
-}
-
-// Loading a state that was stored by a different version of Qt can lead to a crash.
-// This function calculates the state version based on Qt's version and MainWindow.ui's hash (provided through CMake).
-// That way we also avoid potentially causing bugs/glitches when there are changes to MainWindow's widgets.
-constexpr int MainWindow::stateVersion() {
-	return MUMBLE_MAINWINDOW_UI_HASH ^ QT_VERSION;
 }
 
 void MainWindow::createActions() {
@@ -467,7 +466,34 @@ void MainWindow::createActions() {
 }
 
 void MainWindow::setupGui() {
+	// Fork UI persistence: activate the sidecar policy before any presentation
+	// decision reads the fork's mode (new-UI architecture 5.3/5.4). From here
+	// on the nine shared window-state Settings fields are read-only for the
+	// fork; the fork's window state lives exclusively in the sidecar.
+	m_uiStatePersistence = std::make_unique< UiStatePersistence >(Global::get().s, *this);
+	m_uiStatePersistence->setCliVeto(Global::get().preventWindowStatesCLI);
+	m_uiStatePersistence->resolveAndPinPrimaryPath();
+	const UiStateStore::LoadResult uiLoadResult = m_uiStatePersistence->startupLoad();
+	switch (uiLoadResult) {
+		case UiStateStore::LoadResult::Unsupported:
+		case UiStateStore::LoadResult::Invalid:
+		case UiStateStore::LoadResult::IoError:
+			// Queued so it is shown once the event loop runs. The unusable
+			// file itself was preserved untouched by the policy.
+			msgBox(tr("The window layout saved by the redesigned UI could not be read and has been left "
+					  "untouched. The default layout is being used."));
+			break;
+		case UiStateStore::LoadResult::Loaded:
+		case UiStateStore::LoadResult::LoadedGeometryDropped:
+		case UiStateStore::LoadResult::LoadedRestoreBlocked:
+		case UiStateStore::LoadResult::NoSidecar:
+			break;
+	}
+
+	// The title reflects the fork's mode, which is only known now (the seed
+	// above may differ from the stale shared Settings value).
 	updateWindowTitle();
+
 	setCentralWidget(qtvUsers);
 	setAcceptDrops(true);
 
@@ -530,31 +556,42 @@ void MainWindow::setupGui() {
 
 	qaHelpWhatsThis->setShortcuts(QKeySequence::WhatsThis);
 
-	qaConfigMinimal->setChecked(Global::get().s.bMinimalView);
-	qaConfigHideFrame->setChecked(Global::get().s.bHideFrame);
+	qaConfigMinimal->setChecked(isMinimalView());
+	qaConfigHideFrame->setChecked(isHideFrame());
 
 	connect(gsResetAudio, SIGNAL(down(QVariant)), qaAudioReset, SLOT(trigger()));
 	connect(gsUnlink, SIGNAL(down(QVariant)), qaAudioUnlink, SLOT(trigger()));
 	connect(gsMinimal, SIGNAL(down(QVariant)), qaConfigMinimal, SLOT(trigger()));
 
-	dtbLogDockTitle = new DockTitleBar();
-	qdwLog->setTitleBarWidget(dtbLogDockTitle);
-
-	for (QWidget *w : qdwLog->findChildren< QWidget * >()) {
-		w->installEventFilter(dtbLogDockTitle);
-		w->setMouseTracking(true);
-	}
-
-	dtbChatDockTitle = new DockTitleBar();
-	qdwChat->setTitleBarWidget(dtbChatDockTitle);
-	qdwChat->installEventFilter(dtbChatDockTitle);
 	qteChat->setDefaultText(tr("<center>Not connected</center>"), true);
 	qteChat->setEnabled(false);
 
-	QWidget *dummyTitlebar = new QWidget(qdwMinimalViewNote);
-	qdwMinimalViewNote->setTitleBarWidget(dummyTitlebar);
+	// Ownership-critical adoption of the legacy dock contents into the
+	// redesigned shell (new-UI architecture 3). Detach the dock contents first
+	// (setWidget(nullptr) hides them; the shell re-shows them), then take the
+	// tree out of its central-widget role before the shell takes it over
+	// (doing it afterwards would steal the tree back out of the shell's
+	// splitter), hand all three widgets to the shell, make the shell the new
+	// central widget, and only then delete the now-empty dock containers. This
+	// all happens inside the constructor: no posted events reference the docks
+	// and no auto-connected slots exist for them.
+	qdwLog->setWidget(nullptr);
+	qdwChat->setWidget(nullptr);
+	QWidget *adoptedTree = takeCentralWidget();
+	Q_ASSERT(adoptedTree == qtvUsers);
 
-	setShowDockTitleBars((Global::get().s.wlWindowLayout == Settings::LayoutCustom) && !Global::get().s.bLockLayout);
+	m_shell = new MainWindowShell(qtvUsers, qteLog, qteChat, this);
+	setCentralWidget(m_shell);
+
+	delete qdwLog;
+	delete qdwChat;
+	delete qdwMinimalViewNote;
+	qdwLog             = nullptr;
+	qdwChat            = nullptr;
+	qdwMinimalViewNote = nullptr;
+
+	// The redesigned presentation has a fixed toolbar.
+	qtIconToolbar->setMovable(false);
 
 #ifdef Q_OS_MACOS
 	// Workaround for QTBUG-3116 -- using a unified toolbar on Mac OS X
@@ -585,13 +622,15 @@ void MainWindow::setupGui() {
 
 	updateTransmitModeComboBox(Global::get().s.atTransmit);
 
-#ifdef Q_OS_WIN
+	// Establish the destination mode's layout first, then restore that mode's
+	// geometry: a compact window may legitimately be smaller than the normal
+	// layout's minimum width, which is only possible to apply once the
+	// ChatPanel no longer contributes to the window's minimum size. The
+	// Windows-only pre-setupView call of the legacy presentation is thereby
+	// collapsed into this single unconditional one.
 	setupView(false);
-#endif
 
-	loadState(Global::get().s.bMinimalView);
-
-	setupView(false);
+	loadState(isMinimalView());
 
 #ifdef Q_OS_MACOS
 	setWindowOpacity(1.0f);
@@ -600,7 +639,7 @@ void MainWindow::setupGui() {
 
 void MainWindow::updateWindowTitle() {
 	QString title;
-	if (Global::get().s.bMinimalView) {
+	if (isMinimalView()) {
 		title = tr("Mumble - Minimal View");
 	} else {
 		title = tr("Mumble");
@@ -615,24 +654,21 @@ void MainWindow::updateWindowTitle() {
 
 bool MainWindow::isConsoleEntryVisible(Log::MsgType mt) const {
 	Q_UNUSED(mt);
-	// Legacy presentation: the combined log dock is the only console
-	// destination. Behavior is byte-identical to the dock visibility test Log
-	// performed directly before this boundary existed.
-	return isActiveWindow() && qdwLog->isVisible();
+	// The combined log widget inside the redesigned shell is the only console
+	// destination. The shell's query reflects the actual widget visibility, so
+	// minimal mode and hidden ancestors are reported correctly. Stage 5 routes
+	// per message type through this same query.
+	return isActiveWindow() && m_shell && m_shell->isConsoleVisible();
 }
 
-void MainWindow::updateToolbar() {
-	bool layoutIsCustom = Global::get().s.wlWindowLayout == Settings::LayoutCustom;
-	qtIconToolbar->setMovable(layoutIsCustom && !Global::get().s.bLockLayout);
+bool MainWindow::isMinimalView() const {
+	// Before setupGui() runs, the shared values are the seed the fork policy
+	// would adopt; they are never written back.
+	return m_uiStatePersistence ? m_uiStatePersistence->state().minimal : Global::get().s.bMinimalView;
+}
 
-	// Update the toolbar so the movable flag takes effect.
-	if (layoutIsCustom) {
-		// Update the toolbar, but keep it in place.
-		addToolBar(toolBarArea(qtIconToolbar), qtIconToolbar);
-	} else {
-		// Update the toolbar, and ensure it is at the top of the window.
-		addToolBar(Qt::TopToolBarArea, qtIconToolbar);
-	}
+bool MainWindow::isHideFrame() const {
+	return m_uiStatePersistence ? m_uiStatePersistence->state().hideFrame : Global::get().s.bHideFrame;
 }
 
 void MainWindow::updateFavoriteButton() {
@@ -646,17 +682,12 @@ void MainWindow::updateFavoriteButton() {
 	}
 }
 
-// Sets whether or not to show the title bars on the MainWindow's
-// dock widgets.
-void MainWindow::setShowDockTitleBars(bool doShow) {
-	dtbLogDockTitle->setEnabled(doShow);
-	dtbChatDockTitle->setEnabled(doShow);
-}
-
 MainWindow::~MainWindow() {
 	delete qwPTTButtonWidget;
-	delete qdwLog->titleBarWidget();
 	delete pmModel;
+	// The shell owns the presentation containers; the adopted content widgets
+	// are still deleted here explicitly, exactly as in the legacy
+	// presentation, to keep their destruction order stable.
 	delete qtvUsers;
 	delete Channel::get(Mumble::ROOT_CHANNEL_ID);
 }
@@ -726,7 +757,7 @@ void MainWindow::closeEvent(QCloseEvent *e) {
 
 	sh.reset();
 
-	storeState(Global::get().s.bMinimalView);
+	storeState(isMinimalView());
 
 	if (Global::get().talkingUI && Global::get().talkingUI->isVisible()) {
 		// Save the TalkingUI's position if it is visible
@@ -876,18 +907,9 @@ void MainWindow::updateTransmitModeComboBox(Settings::AudioTransmit newMode) {
 }
 
 QMenu *MainWindow::createPopupMenu() {
-	if ((Global::get().s.wlWindowLayout == Settings::LayoutCustom) && !Global::get().s.bLockLayout) {
-		// We have to explicitly create a menu here instead of simply referring to QMainWindow::createPopupMenu as we
-		// don't want a toggle for showing/hiding the minimal view note (which is also present as a QDockWidget). Thus,
-		// we have to explicitly add only those widgets that we really want to be toggleable.
-		QMenu *menu = new QMenu(this);
-		menu->addAction(qdwChat->toggleViewAction());
-		menu->addAction(qdwLog->toggleViewAction());
-		menu->addAction(qtIconToolbar->toggleViewAction());
-
-		return menu;
-	}
-
+	// The redesigned presentation has no dock widgets; the layout is managed
+	// by the shell and explicit layout reset instead of a per-widget toggle
+	// menu.
 	return nullptr;
 }
 
@@ -1438,126 +1460,80 @@ void MainWindow::setOnTop(bool top) {
 }
 
 void MainWindow::loadState(const bool minimalView) {
-	// The Qt restoreGeometry and restoreState methods are very fragile and can crash the
-	// application. Even providing stateVersion() does not prevent all situations where a
-	// stored geometry or state will result in a crash loop.
-	// Hence, before trying to restore the state or geometry, we overwrite the current saved
-	// ones on disk. This prevents a crash loop as the second execution will have the variables
-	// unset. In case restoreGeometry and restoreState does not crash the application, we can
-	// save the geometry and state again to disk.
-	// See: https://github.com/mumble-voip/mumble/issues/7193
-
-	if (Global::get().s.preventWindowStates || Global::get().preventWindowStatesCLI) {
-		qWarning() << "Restoring window state and geometry is blocked by settings latch";
+	// Fork-side restoration: only opaque window geometry (plus the normal-mode
+	// splitter sizes) is restored, through the guarded protocol inside the
+	// persistence policy. The shared Settings window fields are never touched.
+	// The caller is responsible for having established the destination mode's
+	// layout first (see setupView), so a compact window is not clamped up to
+	// the normal layout's minimum size.
+	if (!m_uiStatePersistence || !m_shell) {
 		return;
 	}
 
-	QByteArray geometry;
-	QByteArray state;
-
-	if (minimalView) {
-		geometry                               = Global::get().s.qbaMinimalViewGeometry;
-		state                                  = Global::get().s.qbaMinimalViewState;
-		Global::get().s.qbaMinimalViewGeometry = QByteArray();
-		Global::get().s.qbaMinimalViewState    = QByteArray();
-	} else {
-		geometry                              = Global::get().s.qbaMainWindowGeometry;
-		state                                 = Global::get().s.qbaMainWindowState;
-		Global::get().s.qbaMainWindowGeometry = QByteArray();
-		Global::get().s.qbaMainWindowState    = QByteArray();
+	if (m_uiStatePersistence->restoreGeometry(minimalView)) {
+		qInfo() << "Restored window geometry of the redesigned UI";
 	}
 
-	// This will remain true permanently, if we crash during restore
-	Global::get().s.preventWindowStates = true;
-	Global::get().s.save();
-
-	qInfo() << "Trying to restore window state and geometry";
-
-	if (!geometry.isEmpty()) {
-		restoreGeometry(geometry);
+	if (!minimalView) {
+		const QList< int > &splitterSizes = m_uiStatePersistence->state().normalSplitterSizes;
+		if (!splitterSizes.isEmpty()) {
+			m_shell->setSplitterSizes(splitterSizes);
+		}
 	}
-
-	if (!state.isEmpty()) {
-		restoreState(state, stateVersion());
-	}
-
-	qInfo() << "Successfully restored window state and geometry";
-
-	// Write everything back as we did not crash during the restore
-	Global::get().s.preventWindowStates = false;
-	storeState(minimalView);
-	Global::get().s.save();
 }
 
 void MainWindow::storeState(const bool minimalView) {
-	if (Global::get().s.preventWindowStates || Global::get().preventWindowStatesCLI) {
+	// Fork-side capture into the sidecar. The policy applies the capture rules
+	// itself (--no-window-states veto, active overlay proxy) and performs the
+	// write with its quarantine-on-invalid retry. The shared Settings window
+	// fields are never written by this path.
+	if (!m_uiStatePersistence) {
 		return;
 	}
 
-	if (minimalView) {
-		Global::get().s.qbaMinimalViewGeometry = saveGeometry();
-		Global::get().s.qbaMinimalViewState    = saveState(stateVersion());
-	} else {
-		Global::get().s.qbaMainWindowGeometry = saveGeometry();
-		Global::get().s.qbaMainWindowState    = saveState(stateVersion());
-	}
+	m_uiStatePersistence->captureGeometry(minimalView, m_shell ? m_shell->splitterSizes() : QList< int >());
+	m_uiStatePersistence->save();
 }
 
 void MainWindow::setupView(bool toggle_minimize) {
-	bool showit = !Global::get().s.bMinimalView;
-
-	switch (Global::get().s.wlWindowLayout) {
-		case Settings::LayoutClassic:
-			removeDockWidget(qdwLog);
-			addDockWidget(Qt::LeftDockWidgetArea, qdwLog);
-			qdwLog->show();
-			splitDockWidget(qdwLog, qdwChat, Qt::Vertical);
-			qdwChat->show();
-			break;
-		case Settings::LayoutStacked:
-			removeDockWidget(qdwLog);
-			addDockWidget(Qt::BottomDockWidgetArea, qdwLog);
-			qdwLog->show();
-			splitDockWidget(qdwLog, qdwChat, Qt::Vertical);
-			qdwChat->show();
-			break;
-		case Settings::LayoutHybrid:
-			removeDockWidget(qdwLog);
-			removeDockWidget(qdwChat);
-			addDockWidget(Qt::LeftDockWidgetArea, qdwLog);
-			qdwLog->show();
-			addDockWidget(Qt::BottomDockWidgetArea, qdwChat);
-			qdwChat->show();
-			break;
-		default:
-			break;
-	}
-
-	updateToolbar();
+	// This function is the single authoritative normal/minimal transition of
+	// the redesigned presentation: the toggle slots only flip the fork state
+	// and call into here. Ordering is critical: the outgoing mode is captured
+	// before any layout change, the destination layout and visibility are
+	// established before the destination geometry is restored (a compact
+	// window may be smaller than the normal layout's minimum width).
+	bool showit = !isMinimalView();
 
 	qteChat->updateGeometry();
 
 	QRect geom = frameGeometry();
 
+	// Capture the geometry of the mode we are leaving. The flag has already
+	// been flipped by the toggle slot, so showit names the pair being left.
 	if (toggle_minimize) {
 		storeState(showit);
 	}
 
 	Qt::WindowFlags f = Qt::Window;
 	if (!showit) {
-		if (Global::get().s.bHideFrame) {
+		if (isHideFrame()) {
 			f |= Qt::FramelessWindowHint;
 		}
 	}
 
 	if (Global::get().s.aotbAlwaysOnTop == Settings::OnTopAlways
-		|| (Global::get().s.bMinimalView && Global::get().s.aotbAlwaysOnTop == Settings::OnTopInMinimal)
-		|| (!Global::get().s.bMinimalView && Global::get().s.aotbAlwaysOnTop == Settings::OnTopInNormal)) {
+		|| (isMinimalView() && Global::get().s.aotbAlwaysOnTop == Settings::OnTopInMinimal)
+		|| (!isMinimalView() && Global::get().s.aotbAlwaysOnTop == Settings::OnTopInNormal)) {
 		f |= Qt::WindowStaysOnTopHint;
 	}
 
-	if (!graphicsProxyWidget())
-		setWindowFlags(f);
+	// setWindowFlags() hides a visible window, which would break live toggles;
+	// the preserving helper keeps visibility, size and position intact and
+	// never forces a hidden (e.g. tray-minimized) window onto the screen.
+	// Skipped while embedded in the interactive overlay.
+	if (!graphicsProxyWidget()) {
+		UiStatePersistence::applyWindowFlagsPreservingState(*this, f);
+	}
 
 	if (Global::get().s.bShowContextMenuInMenuBar) {
 		bool found = false;
@@ -1593,30 +1569,25 @@ void MainWindow::setupView(bool toggle_minimize) {
 		menuBar()->removeAction(qmDeveloper->menuAction());
 	}
 
+	// Establish the destination layout and visibility. The shell hides the
+	// chat panel (and the header) in minimal mode, which removes their
+	// contribution to the window's minimum size - the prerequisite for
+	// restoring a compact window below.
+	m_shell->setMinimal(!showit);
+	qtIconToolbar->setVisible(showit);
+	menuBar()->setVisible(showit);
+	m_shell->setNoteVisible(!showit && !Global::get().sh);
+
 	if (toggle_minimize) {
+		// Restore the geometry of the mode we are entering.
 		loadState(!showit);
 	} else {
+		// Compensate the frame size change of a live flag change (e.g. the
+		// hide-frame toggle) so the on-screen window rectangle is preserved.
 		QRect newgeom = frameGeometry();
 		resize(geometry().width() - newgeom.width() + geom.width(),
 			   geometry().height() - newgeom.height() + geom.height());
 		move(geom.x(), geom.y());
-	}
-
-
-	// Explicitly hide UI elements, if we're entering minimal view
-	// Note that showing them again is handled above via restoreState/restoreGeometry calls
-	if (!showit) {
-		qdwLog->setVisible(false);
-		qdwChat->setVisible(false);
-		qtIconToolbar->setVisible(false);
-	}
-	menuBar()->setVisible(showit);
-
-	if (showit) {
-		qdwMinimalViewNote->hide();
-	} else if (!Global::get().sh) {
-		// Show the note, if we're not connected to a server
-		qdwMinimalViewNote->show();
 	}
 
 	// Display the Transmit Mode Dropdown, if configured to do so, otherwise
@@ -1845,7 +1816,7 @@ void MainWindow::qmUser_aboutToShow() {
 	}
 
 #ifndef Q_OS_MACOS
-	if (Global::get().s.bMinimalView) {
+	if (isMinimalView()) {
 		qmUser->addSeparator();
 		qmUser->addMenu(qmServer);
 		qmUser->addMenu(qmSelf);
@@ -2338,7 +2309,7 @@ void MainWindow::on_qmConfig_aboutToShow() {
 	qaTalkingUIToggle->setChecked(Global::get().talkingUI && Global::get().talkingUI->isVisible());
 
 	qmConfig->addAction(qaTalkingUIToggle);
-	if (Global::get().s.bMinimalView)
+	if (isMinimalView())
 		qmConfig->addAction(qaConfigHideFrame);
 }
 
@@ -2379,7 +2350,7 @@ void MainWindow::qmChannel_aboutToShow() {
 	}
 
 #ifndef Q_OS_MACOS
-	if (Global::get().s.bMinimalView) {
+	if (isMinimalView()) {
 		qmChannel->addSeparator();
 		qmChannel->addMenu(qmServer);
 		qmChannel->addMenu(qmSelf);
@@ -2886,14 +2857,55 @@ void MainWindow::on_qaConfigDialog_triggered() {
 }
 
 void MainWindow::on_qaConfigMinimal_triggered() {
-	Global::get().s.bMinimalView = qaConfigMinimal->isChecked();
+	// Flip the fork state only; setupView() is the single authoritative
+	// transition (capture outgoing -> destination layout -> restore incoming)
+	// and the shared Settings field is never written.
+	m_uiStatePersistence->setMinimal(qaConfigMinimal->isChecked());
 	updateWindowTitle();
 	setupView();
 }
 
 void MainWindow::on_qaConfigHideFrame_triggered() {
-	Global::get().s.bHideFrame = qaConfigHideFrame->isChecked();
+	// No geometry cycle: a frame change only alters the window flags, which
+	// setupView compensates on the fly.
+	m_uiStatePersistence->setHideFrame(qaConfigHideFrame->isChecked());
 	setupView(false);
+}
+
+void MainWindow::resetUiStateLayout() {
+	// Explicit fork layout reset (new-UI architecture 5.4). Ordered so that
+	// nothing afterwards can undo the reset: the sidecar is rewritten with
+	// defaults and a released restore latch, the default mode (normal, framed)
+	// is applied through the single authoritative transition, and the default
+	// window rectangle is applied last so no later flag/compensation code
+	// shifts it. The shared settings file is never touched.
+	if (!m_uiStatePersistence || !m_shell) {
+		return;
+	}
+
+	QString error;
+	if (!m_uiStatePersistence->resetLayout(&error)) {
+		msgBox(tr("The window layout of the redesigned UI could not be reset: %1").arg(error));
+	}
+
+	qaConfigMinimal->setChecked(false);
+	qaConfigHideFrame->setChecked(false);
+	m_uiStatePersistence->setMinimal(false);
+	m_uiStatePersistence->setHideFrame(false);
+	updateWindowTitle();
+
+	// The default splitter ratio; QSplitter itself clamps the distribution to
+	// the current width and the pane minimums.
+	m_shell->setSplitterSizes(QList< int >() << 240 << 720);
+
+	setupView(false);
+
+	// Apply size AND position last: because the window itself now carries the
+	// default geometry, a capture after the reset (close, session end)
+	// persists the default layout, never the pre-reset one.
+	const QRect defaultRect = m_uiStatePersistence->defaultWindowRect();
+	resize(defaultRect.size());
+	move(defaultRect.topLeft());
 }
 
 void MainWindow::on_qaConfigCert_triggered() {
@@ -3615,7 +3627,7 @@ void MainWindow::serverConnected() {
 	TaskList::addToRecentList(Global::get().s.qsLastServer, uname, host, port);
 #endif
 
-	qdwMinimalViewNote->hide();
+	m_shell->setNoteVisible(false);
 }
 
 void MainWindow::serverDisconnected(QAbstractSocket::SocketError err, QString reason) {
@@ -3832,9 +3844,8 @@ void MainWindow::serverDisconnected(QAbstractSocket::SocketError err, QString re
 	}
 	AudioInput::setMaxBandwidth(-1);
 
-	if (Global::get().s.bMinimalView) {
-		qdwMinimalViewNote->show();
-	}
+	// The shell shows the note only in minimal mode.
+	m_shell->setNoteVisible(true);
 
 	emit disconnectedFromServer();
 }
