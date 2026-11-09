@@ -257,6 +257,8 @@ set(MUMBLE_SOURCES
 	"Tokens.ui"
 	"Translations.cpp"
 	"Translations.h"
+	"UiStateStore.cpp"
+	"UiStateStore.h"
 	"Usage.cpp"
 	"Usage.h"
 	"UserEdit.cpp"
