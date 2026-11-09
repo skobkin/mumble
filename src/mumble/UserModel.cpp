@@ -488,6 +488,33 @@ QList< QVariant > UserModel::statusIcons(const ModelItem *item, bool *hasComment
 	return l;
 }
 
+QString UserModel::channelStatusTooltip(ChannelFilterMode filterMode, bool hasEnterRestrictions,
+										  bool localUserCanEnter) {
+	QStringList status;
+
+	switch (filterMode) {
+		case ChannelFilterMode::HIDE:
+			status << tr("Filtered (hidden while the channel filter is active)");
+			break;
+		case ChannelFilterMode::PIN:
+			status << tr("Pinned");
+			break;
+		case ChannelFilterMode::NORMAL:
+			// NOOP
+			break;
+	}
+
+	if (hasEnterRestrictions) {
+		if (localUserCanEnter) {
+			status << tr("Enter restricted (you may enter)");
+		} else {
+			status << tr("Enter restricted");
+		}
+	}
+
+	return status.join(QLatin1String(", "));
+}
+
 QVariant UserModel::data(const QModelIndex &idx, int role) const {
 	if (!idx.isValid())
 		return QVariant();
@@ -741,7 +768,20 @@ QVariant UserModel::otherRoles(const QModelIndex &idx, int role) const {
 					}
 				} break;
 				case 1:
-					return isUser ? p->getFlagsString() : QVariant();
+					if (isUser) {
+						QString qsFlags = p->getFlagsString();
+						// ClientUser carries no push-to-mute state (it never
+						// leaves the local client), so it is appended here, where
+						// Global is reachable - for the local user only.
+						if (Global::get().bPushToMute && p == ClientUser::get(Global::get().uiSession)) {
+							if (!qsFlags.isEmpty())
+								qsFlags += QLatin1String(", ");
+							qsFlags += ClientUser::tr("Muted (push-to-mute)");
+						}
+						return qsFlags;
+					}
+					return channelStatusTooltip(c->m_filterMode, c->hasEnterRestrictions.load(),
+												c->localUserCanEnter.load());
 			}
 			break;
 		case Qt::WhatsThisRole:

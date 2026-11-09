@@ -20,6 +20,8 @@
 
 #include <QtTest>
 
+#include "ChannelFilterMode.h"
+#include "ClientUser.h"
 #include "UserModel.h"
 #include "UserView.h"
 
@@ -88,10 +90,13 @@ public:
 		m_root->name = QStringLiteral("Root");
 
 		// A channel whose row shows the full channel strip: comment + filter
-		// + lock. Channels currently have no column-1 flags tooltip.
+		// + lock, with the matching status tooltip the production model
+		// assembles for it.
 		Node *channel        = addNode(m_root, QStringLiteral("Everything Channel"), RowType::Channel);
 		channel->statusIcons = { commentStatusIcon(), otherStatusIcon(), otherStatusIcon() };
 		channel->commentIcon = true;
+		channel->flagsTooltip =
+			UserModel::channelStatusTooltip(ChannelFilterMode::HIDE, true, false);
 
 		// A channel without any icons: the empty-strip case.
 		addNode(m_root, QStringLiteral("Bare Channel"), RowType::Channel);
@@ -278,6 +283,11 @@ private slots:
 	// strip (observed through the model's query counter and the delegate's
 	// return value, which mirrors the tooltip data).
 	void helpEventForwardsExactlyTheIconStrip();
+
+	// The channel status tooltip helper covers every filter/restriction
+	// combination, and the user flags string carries the suppressed state.
+	void channelStatusTooltipCoversAllStates();
+	void flagsStringIncludesSuppressed();
 
 	// In right-to-left layouts the strip must move to the visual trailing
 	// edge - in the geometry, in click classification, and in what is
@@ -591,6 +601,50 @@ void TestUserNavigation::helpEventForwardsExactlyTheIconStrip() {
 			}
 		}
 	}
+}
+
+void TestUserNavigation::channelStatusTooltipCoversAllStates() {
+	// no filter mode, no restrictions: nothing to say
+	QCOMPARE(UserModel::channelStatusTooltip(ChannelFilterMode::NORMAL, false, false), QString());
+	QCOMPARE(UserModel::channelStatusTooltip(ChannelFilterMode::NORMAL, false, true), QString());
+
+	// filter modes read back
+	const QString filtered = UserModel::channelStatusTooltip(ChannelFilterMode::HIDE, false, false);
+	const QString pinned   = UserModel::channelStatusTooltip(ChannelFilterMode::PIN, false, false);
+	QVERIFY(!filtered.isEmpty());
+	QVERIFY(!pinned.isEmpty());
+	QVERIFY(filtered != pinned);
+
+	// enter restrictions distinguish locked from enterable
+	const QString locked    = UserModel::channelStatusTooltip(ChannelFilterMode::NORMAL, true, false);
+	const QString enterable = UserModel::channelStatusTooltip(ChannelFilterMode::NORMAL, true, true);
+	QVERIFY(!locked.isEmpty());
+	QVERIFY(!enterable.isEmpty());
+	QVERIFY(locked != enterable);
+
+	// combined states contain both parts
+	const QString combined = UserModel::channelStatusTooltip(ChannelFilterMode::PIN, true, false);
+	QVERIFY(combined.contains(pinned));
+	QVERIFY(combined.contains(locked));
+}
+
+void TestUserNavigation::flagsStringIncludesSuppressed() {
+	ClientUser user;
+
+	// no flags at all
+	QCOMPARE(user.getFlagsString(), QString());
+
+	// suppressed is part of the flags now (regression: it was missing while
+	// the model already painted the suppressed icon)
+	user.bSuppress = true;
+	QVERIFY(user.getFlagsString().contains(ClientUser::tr("Muted (suppressed)")));
+
+	// it sorts right after the server mute, matching the icon order
+	user.bMute = true;
+	const QStringList parts = user.getFlagsString().split(QLatin1String(", "));
+	QCOMPARE(parts.count(), 2);
+	QCOMPARE(parts.first(), ClientUser::tr("Muted (server)"));
+	QCOMPARE(parts.last(), ClientUser::tr("Muted (suppressed)"));
 }
 
 void TestUserNavigation::iconStripMirrorsToVisualTrailingEdgeInRtl() {

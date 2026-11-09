@@ -12,6 +12,8 @@
 #include <QtCore/QSet>
 #include <QtGui/QIcon>
 
+#include "ChannelFilterMode.h"
+
 #include <optional>
 
 class User;
@@ -127,6 +129,12 @@ public:
 	/// Item role (RowKind as int): the classification of this row. Served
 	/// for both columns on every row. Presentation-only.
 	static constexpr int RowKindRole = Qt::UserRole + 2;
+
+	/// Assembles the status tooltip of a channel row's status icons (the
+	/// filter/pin state and the enter restrictions) from the same inputs
+	/// that decide the icons, so tooltip and icons cannot drift.
+	static QString channelStatusTooltip(ChannelFilterMode filterMode, bool hasEnterRestrictions,
+										bool localUserCanEnter);
 
 	UserModel(QObject *parent = 0);
 	~UserModel() Q_DECL_OVERRIDE;

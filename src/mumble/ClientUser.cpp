@@ -134,6 +134,8 @@ QString ClientUser::getFlagsString() const {
 		flags << ClientUser::tr("Recording");
 	if (bMute)
 		flags << ClientUser::tr("Muted (server)");
+	if (bSuppress)
+		flags << ClientUser::tr("Muted (suppressed)");
 	if (bDeaf)
 		flags << ClientUser::tr("Deafened (server)");
 	if (bLocalIgnore)
