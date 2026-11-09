@@ -241,9 +241,18 @@ protected:
 	void updateWindowTitle();
 	/// Re-derives the connection snapshot (state, server description, user
 	/// and channel counts) from the live connection state and pushes it to
-	/// the header. Called at the connection lifecycle points; counts are
-	/// resolved at push time, never cached.
+	/// the header. Called at the connection lifecycle points and on every
+	/// UserModel user/channel addition/removal (the model emits after the
+	/// underlying collections have been updated, so counts are fresh);
+	/// counts are resolved at push time, never cached.
 	void updateConnectionHeader();
+
+	/// Pushes the Connecting snapshot at the moment a connection attempt
+	/// starts. The tri-state cannot be derived there yet (the freshly
+	/// created server handler's thread may not report running until after
+	/// start() returns), so the state is pushed explicitly; the server
+	/// description is read from the already-configured handler.
+	void showConnectionAttemptInHeader();
 	void updateFavoriteButton();
 	void customEvent(QEvent *evt) Q_DECL_OVERRIDE;
 	void findDesiredChannel();

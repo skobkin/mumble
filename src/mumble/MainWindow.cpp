@@ -547,6 +547,15 @@ void MainWindow::setupGui() {
 	QObject::connect(pmModel, &UserModel::channelRenamed, Global::get().pluginManager,
 					 &PluginManager::on_channelRenamed);
 
+	// The connection header's user/channel counts must stay fresh after the
+	// initial synchronization: the model emits these AFTER updating the
+	// underlying ClientUser/Channel collections, so re-deriving the snapshot
+	// in a direct connection always sees the current sizes.
+	QObject::connect(pmModel, &UserModel::userAdded, this, &MainWindow::updateConnectionHeader);
+	QObject::connect(pmModel, &UserModel::userRemoved, this, &MainWindow::updateConnectionHeader);
+	QObject::connect(pmModel, &UserModel::channelAdded, this, &MainWindow::updateConnectionHeader);
+	QObject::connect(pmModel, &UserModel::channelRemoved, this, &MainWindow::updateConnectionHeader);
+
 	qaAudioMute->setChecked(Global::get().s.bMute);
 	qaAudioDeaf->setChecked(Global::get().s.bDeaf);
 
@@ -1420,6 +1429,12 @@ void MainWindow::openUrl(const QUrl &url) {
 						 tr("Connecting to server %1.").arg(Log::msgColor(host.toHtmlEscaped(), Log::Server)));
 	Global::get().sh->setConnectionInfo(host, port, user, pw);
 	Global::get().sh->start(QThread::TimeCriticalPriority);
+
+	// The attempt has started: show Connecting right away instead of waiting
+	// for the transport to come up (updateConnectionHeader's derived state
+	// cannot be used yet - the handler thread may not report running until
+	// after start() returns).
+	showConnectionAttemptInHeader();
 }
 
 /**
@@ -1646,6 +1661,12 @@ void MainWindow::on_Reconnect_timeout() {
 
 	Global::get().l->log(Log::Information, tr("Reconnecting."));
 	Global::get().sh->start(QThread::TimeCriticalPriority);
+
+	// The attempt has started: show Connecting right away instead of waiting
+	// for the transport to come up (updateConnectionHeader's derived state
+	// cannot be used yet - the handler thread may not report running until
+	// after start() returns).
+	showConnectionAttemptInHeader();
 }
 
 void MainWindow::on_qmSelf_aboutToShow() {
@@ -3625,6 +3646,27 @@ void MainWindow::updateConnectionHeader() {
 	m_header->updateConnectionSnapshot(state, description, users, channels);
 }
 
+void MainWindow::showConnectionAttemptInHeader() {
+	if (!m_header) {
+		return;
+	}
+
+	// The connection info is already configured on the handler at every
+	// attempt-start call site, so the description is available; there are no
+	// counts to show before synchronization.
+	QString description;
+	if (Global::get().sh) {
+		QString host, username, password;
+		unsigned short port;
+		Global::get().sh->getConnectionInfo(host, port, username, password);
+		if (!host.isEmpty()) {
+			description = port != 0 ? QStringLiteral("%1:%2").arg(host).arg(port) : host;
+		}
+	}
+
+	m_header->updateConnectionSnapshot(ConnectionHeader::ConnectionState::Connecting, description, 0, 0);
+}
+
 void MainWindow::serverConnected() {
 	m_reconnectSoundBlocker.reset();
 
@@ -4158,6 +4200,12 @@ void MainWindow::openServerConnectDialog(bool autoconnect) {
 			tr("Connecting to server %1.").arg(Log::msgColor(cd->qsServer.toHtmlEscaped(), Log::Server)));
 		Global::get().sh->setConnectionInfo(cd->qsServer, cd->usPort, cd->qsUsername, cd->qsPassword);
 		Global::get().sh->start(QThread::TimeCriticalPriority);
+
+		// The attempt has started: show Connecting right away instead of
+		// waiting for the transport to come up (updateConnectionHeader's
+		// derived state cannot be used yet - the handler thread may not
+		// report running until after start() returns).
+		showConnectionAttemptInHeader();
 	}
 	delete cd;
 

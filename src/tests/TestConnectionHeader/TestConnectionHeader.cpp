@@ -31,6 +31,15 @@ private slots:
 	void clickTriggersExactlyOnce();
 	void snapshotReplacesStaleState();
 
+	// The count-freshness contract: MainWindow re-pushes a snapshot on every
+	// UserModel userAdded/userRemoved/channelAdded/channelRemoved emission
+	// (each fires after the underlying collection was updated), so the
+	// displayed counts must track every re-pushed value - including the
+	// steady growth of an initial synchronization. The model-side wiring
+	// itself lives in MainWindow (Global-bound, manual coverage); this pins
+	// the header half: no stale count may survive a later snapshot.
+	void countSnapshotsStayFreshUnderRepeatedPushes();
+
 private:
 	static QList< QToolButton * > buttonsOf(const ConnectionHeader &header) {
 		return header.findChildren< QToolButton * >();
@@ -115,6 +124,37 @@ void TestConnectionHeader::snapshotReplacesStaleState() {
 	QCOMPARE(header.connectionState(), ConnectionHeader::ConnectionState::Disconnected);
 	QVERIFY(!header.statusLabel()->text().contains(QStringLiteral("other.org:64738")));
 	QVERIFY(header.countLabel()->text().isEmpty());
+}
+
+void TestConnectionHeader::countSnapshotsStayFreshUnderRepeatedPushes() {
+	QAction connectAction, disconnectAction, informationAction, searchAction;
+	ConnectionHeader header(&connectAction, &disconnectAction, &informationAction, &searchAction);
+	header.show();
+
+	// Initial synchronization arriving user by user: every re-push must be
+	// reflected immediately, never lag one change behind.
+	for (int users = 1; users <= 5; ++users) {
+		header.updateConnectionSnapshot(ConnectionHeader::ConnectionState::Synchronized,
+										QStringLiteral("example.org:64738"), users, 2);
+		QVERIFY(header.countLabel()->text().contains(QString::number(users)));
+	}
+
+	// Users leaving again.
+	const int shrinking[] = { 4, 3, 1 };
+	for (const int users : shrinking) {
+		header.updateConnectionSnapshot(ConnectionHeader::ConnectionState::Synchronized,
+										QStringLiteral("example.org:64738"), users, 2);
+		QVERIFY(header.countLabel()->text().contains(QString::number(users)));
+	}
+
+	// The connection attempt push carries no counts...
+	header.updateConnectionSnapshot(ConnectionHeader::ConnectionState::Connecting, QStringLiteral("other.org:64738"), 0, 0);
+	QVERIFY(header.countLabel()->text().isEmpty());
+
+	// ...and a later synchronized snapshot restores live counts.
+	header.updateConnectionSnapshot(ConnectionHeader::ConnectionState::Synchronized, QStringLiteral("other.org:64738"), 7, 4);
+	QVERIFY(header.countLabel()->text().contains(QStringLiteral("7")));
+	QVERIFY(header.countLabel()->text().contains(QStringLiteral("4")));
 }
 
 QTEST_MAIN(TestConnectionHeader)
