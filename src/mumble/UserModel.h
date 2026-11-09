@@ -91,6 +91,14 @@ protected:
 
 	QString stringIndex(const QModelIndex &index) const;
 
+	/// Assembles the status-icon list displayed after a row's text (column 1,
+	/// Qt::DisplayRole) in the authoritative order, and reports through
+	/// \p hasCommentIcon (if not null) whether the leading entry is the
+	/// comment indicator. Painting, tooltip forwarding and click hit-testing
+	/// must all derive from this one assembly instead of reconstructing an
+	/// icon layout of their own.
+	QList< QVariant > statusIcons(const ModelItem *item, bool *hasCommentIcon = nullptr) const;
+
 	/// @returns The QModelIndex that is currently selected. If there is no selection, the returned index
 	/// 	is invalid.
 	QModelIndex getSelectedIndex() const;
@@ -104,6 +112,12 @@ protected:
 	void removeChannelListener(ModelItem *item, ModelItem *citem = nullptr);
 
 public:
+	/// Item role (bool): whether this row's status-icon list (column 1,
+	/// Qt::DisplayRole) begins with the comment indicator. Presentation-only,
+	/// so view-side hit-testing can use the painted icon geometry without
+	/// reconstructing icon presence from ClientUser/Channel flags.
+	static constexpr int CommentIconRole = Qt::UserRole + 1;
+
 	UserModel(QObject *parent = 0);
 	~UserModel() Q_DECL_OVERRIDE;
 

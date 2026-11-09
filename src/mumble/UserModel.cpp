@@ -410,6 +410,84 @@ QModelIndex UserModel::getSelectedIndex() const {
 	return QModelIndex();
 }
 
+QList< QVariant > UserModel::statusIcons(const ModelItem *item, bool *hasCommentIcon) const {
+	QList< QVariant > l;
+	bool commentIcon = false;
+
+	if (item->pUser) {
+		const ClientUser *p     = item->pUser;
+		const ClientUser *pSelf = ClientUser::get(Global::get().uiSession);
+
+		// Most of the following icons are for non-listeners (as listeners are merely proxies) only
+		// but in order to not change the order of the icons, the condition is added to each case
+		// individually instead of checking it up front.
+		if (!p->qbaCommentHash.isEmpty() && !item->isListener) {
+			l << (item->bCommentSeen ? qiCommentSeen : qiComment);
+			commentIcon = true;
+		}
+		if (p->bPrioritySpeaker && !item->isListener)
+			l << qiPrioritySpeaker;
+		if (p->bRecording)
+			l << qiRecording;
+		// ClientUser doesn't contain a push-to-mute
+		// state because it isn't sent to the server.
+		// We can show the icon only for the local user.
+		if (p == pSelf && Global::get().bPushToMute && !item->isListener)
+			l << qiMutedPushToMute;
+		if (p->bMute || item->isListener)
+			l << qiMutedServer;
+		if (p->bSuppress && !item->isListener)
+			l << qiMutedSuppressed;
+		if (p->bSelfMute && !item->isListener)
+			l << qiMutedSelf;
+		if (p->bLocalMute && !item->isListener)
+			l << qiMutedLocal;
+		if (p->bLocalIgnore && !item->isListener)
+			l << qiIgnoredLocal;
+		if (p->bDeaf)
+			l << qiDeafenedServer;
+		if (p->bSelfDeaf)
+			l << qiDeafenedSelf;
+		if (p->iId >= 0 && !item->isListener)
+			l << qiAuthenticated;
+		if (!p->qsFriendName.isEmpty() && !item->isListener)
+			l << qiFriend;
+	} else if (item->cChan) {
+		const Channel *c = item->cChan;
+
+		if (!c->qbaDescHash.isEmpty()) {
+			l << (item->bCommentSeen ? qiCommentSeen : qiComment);
+			commentIcon = true;
+		}
+
+		switch (c->m_filterMode) {
+			case ChannelFilterMode::HIDE:
+				l << (qiFilter);
+				break;
+			case ChannelFilterMode::PIN:
+				l << (qiPin);
+				break;
+			case ChannelFilterMode::NORMAL:
+				// NOOP
+				break;
+		}
+
+		// Show a lock icon for enter restricted channels
+		if (c->hasEnterRestrictions.load()) {
+			if (c->localUserCanEnter.load()) {
+				l << qiLock_unlocked;
+			} else {
+				l << qiLock_locked;
+			}
+		}
+	}
+
+	if (hasCommentIcon)
+		*hasCommentIcon = commentIcon;
+
+	return l;
+}
+
 QVariant UserModel::data(const QModelIndex &idx, int role) const {
 	if (!idx.isValid())
 		return QVariant();
@@ -424,11 +502,15 @@ QVariant UserModel::data(const QModelIndex &idx, int role) const {
 		return QVariant();
 	}
 
+	if (role == CommentIconRole) {
+		bool hasCommentIcon = false;
+		statusIcons(item, &hasCommentIcon);
+		return hasCommentIcon;
+	}
+
 	QVariant v = otherRoles(idx, role);
 	if (v.isValid())
 		return v;
-
-	QList< QVariant > l;
 
 	if (p) {
 		switch (role) {
@@ -483,39 +565,7 @@ QVariant UserModel::data(const QModelIndex &idx, int role) const {
 					return createDisplayString(*p, item->isListener, parentChannel);
 				}
 
-				// Most of the following icons are for non-listeners (as listeners are merely proxies) only
-				// but in order to not change the order of the icons, the condition is added to each case
-				// individually instead of checking it up front.
-				if (!p->qbaCommentHash.isEmpty() && !item->isListener)
-					l << (item->bCommentSeen ? qiCommentSeen : qiComment);
-				if (p->bPrioritySpeaker && !item->isListener)
-					l << qiPrioritySpeaker;
-				if (p->bRecording)
-					l << qiRecording;
-				// ClientUser doesn't contain a push-to-mute
-				// state because it isn't sent to the server.
-				// We can show the icon only for the local user.
-				if (p == pSelf && Global::get().bPushToMute && !item->isListener)
-					l << qiMutedPushToMute;
-				if (p->bMute || item->isListener)
-					l << qiMutedServer;
-				if (p->bSuppress && !item->isListener)
-					l << qiMutedSuppressed;
-				if (p->bSelfMute && !item->isListener)
-					l << qiMutedSelf;
-				if (p->bLocalMute && !item->isListener)
-					l << qiMutedLocal;
-				if (p->bLocalIgnore && !item->isListener)
-					l << qiIgnoredLocal;
-				if (p->bDeaf)
-					l << qiDeafenedServer;
-				if (p->bSelfDeaf)
-					l << qiDeafenedSelf;
-				if (p->iId >= 0 && !item->isListener)
-					l << qiAuthenticated;
-				if (!p->qsFriendName.isEmpty() && !item->isListener)
-					l << qiFriend;
-				return l;
+				return statusIcons(item);
 			case Qt::AccessibleTextRole:
 				if (item->isListener) {
 					return tr("Channel Listener");
@@ -549,30 +599,8 @@ QVariant UserModel::data(const QModelIndex &idx, int role) const {
 
 					return QString::fromLatin1("%1 (%2)").arg(c->qsName).arg(item->iUsers);
 				}
-				if (!c->qbaDescHash.isEmpty())
-					l << (item->bCommentSeen ? qiCommentSeen : qiComment);
 
-				switch (c->m_filterMode) {
-					case ChannelFilterMode::HIDE:
-						l << (qiFilter);
-						break;
-					case ChannelFilterMode::PIN:
-						l << (qiPin);
-						break;
-					case ChannelFilterMode::NORMAL:
-						// NOOP
-						break;
-				}
-
-				// Show a lock icon for enter restricted channels
-				if (c->hasEnterRestrictions.load()) {
-					if (c->localUserCanEnter.load()) {
-						l << qiLock_unlocked;
-					} else {
-						l << qiLock_locked;
-					}
-				}
-				return l;
+				return statusIcons(item);
 			case Qt::FontRole:
 				if (Global::get().uiSession) {
 					Channel *home = ClientUser::get(Global::get().uiSession)->cChannel;

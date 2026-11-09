@@ -27,6 +27,38 @@ void UserDelegate::adjustIcons(int iconTotalDimension, int iconIconPadding, int 
 	m_iconIconDimension  = iconIconDimension;
 }
 
+UserStatusGeometry UserDelegate::computeGeometry(const QStyleOptionViewItem &option, const QList< QVariant > &statusIcons,
+												 int commentIconIndex, int iconTotalDimension, int iconIconPadding,
+												 int iconIconDimension) {
+	UserStatusGeometry geometry;
+
+	const int iconCount = static_cast< int >(statusIcons.count());
+	if (iconCount <= 0) {
+		geometry.contentRect = option.rect;
+		return geometry;
+	}
+
+	const int stripWidth = iconCount * iconTotalDimension;
+	geometry.stripRect   = QRect(option.rect.right() - stripWidth, option.rect.y(), stripWidth, option.rect.height());
+	geometry.contentRect = QRect(option.rect.x(), option.rect.y(), option.rect.width() - stripWidth,
+								 option.rect.height());
+
+	const int iconPosY = (option.rect.height() / 2) - (iconIconDimension / 2);
+	geometry.iconRects.reserve(iconCount);
+	for (int i = 0; i < iconCount; ++i) {
+		QRect iconRect = geometry.stripRect;
+		iconRect.setSize(QSize(iconIconDimension, iconIconDimension));
+		iconRect.translate(i * iconTotalDimension + iconIconPadding, iconPosY);
+		geometry.iconRects.append(iconRect);
+	}
+
+	if (commentIconIndex >= 0 && commentIconIndex < iconCount) {
+		geometry.commentIconRect = geometry.iconRects.at(commentIconIndex);
+	}
+
+	return geometry;
+}
+
 void UserDelegate::paint(QPainter *painter, const QStyleOptionViewItem &option, const QModelIndex &index) const {
 	const QAbstractItemModel *m = index.model();
 	const QModelIndex idxc1     = index.sibling(index.row(), 1);
@@ -64,10 +96,13 @@ void UserDelegate::paint(QPainter *painter, const QStyleOptionViewItem &option, 
 	// draw background
 	style->drawPrimitive(QStyle::PE_PanelItemViewItem, &o, painter, o.widget);
 
-	// resize rect to exclude the icons
-	o.rect = option.rect.adjusted(0, 0, static_cast< int >(-m_iconTotalDimension * ql.count()), 0);
+	// the shared geometry decides where the status icons sit and what
+	// remains of the row for decoration and text
+	const UserStatusGeometry geometry = computeGeometry(option, ql, -1, m_iconTotalDimension, m_iconIconPadding,
+														m_iconIconDimension);
 
 	// draw icon
+	o.rect            = geometry.contentRect;
 	QRect decorationRect = style->subElementRect(QStyle::SE_ItemViewItemDecoration, &o, o.widget);
 	o.icon.paint(painter, decorationRect, o.decorationAlignment, iconMode, QIcon::On);
 
@@ -78,17 +113,10 @@ void UserDelegate::paint(QPainter *painter, const QStyleOptionViewItem &option, 
 	style->drawItemText(painter, textRect, static_cast< int >(o.displayAlignment), o.palette, true, itemText,
 						colorRole);
 
-	// draw icons to original rect
-	const QRect ps     = QRect(option.rect.right() - (static_cast< int >(ql.size() * m_iconTotalDimension)),
-                           option.rect.y(), static_cast< int >(ql.size() * m_iconTotalDimension), option.rect.height());
-	const int iconPosY = (option.rect.height() / 2) - (m_iconIconDimension / 2);
-
+	// draw the status icons at the shared geometry's positions
 	for (int i = 0; i < ql.size(); ++i) {
-		QRect r = ps;
-		r.setSize(QSize(m_iconIconDimension, m_iconIconDimension));
-		r.translate(i * m_iconTotalDimension + m_iconIconPadding, iconPosY);
-		QRect p = QStyle::alignedRect(option.direction, option.decorationAlignment, r.size(), r);
-		qvariant_cast< QIcon >(ql[i]).paint(painter, p, option.decorationAlignment, iconMode, QIcon::On);
+		qvariant_cast< QIcon >(ql[i]).paint(painter, geometry.iconRects.at(i), option.decorationAlignment, iconMode,
+											QIcon::On);
 	}
 
 	painter->restore();
@@ -101,10 +129,13 @@ bool UserDelegate::helpEvent(QHelpEvent *evt, QAbstractItemView *view, const QSt
 		const QModelIndex firstColumnIdx = index.sibling(index.row(), 1);
 		QVariant data                    = m->data(firstColumnIdx);
 		QList< QVariant > iconList       = data.toList();
-		const auto offset                = static_cast< int >(iconList.size() * -m_iconTotalDimension);
-		const int firstIconPos           = option.rect.topRight().x() + offset;
 
-		if (evt->pos().x() >= firstIconPos) {
+		// the shared geometry decides which positions belong to the status
+		// icons: help events there answer the column-1 flags tooltip
+		const UserStatusGeometry geometry = computeGeometry(option, iconList, -1, m_iconTotalDimension,
+															m_iconIconPadding, m_iconIconDimension);
+
+		if (geometry.stripRect.contains(evt->pos())) {
 			return QStyledItemDelegate::helpEvent(evt, view, option, firstColumnIdx);
 		}
 	}
@@ -118,7 +149,7 @@ UserView::UserView(QWidget *p) : QTreeView(p), m_userDelegate(make_qt_unique< Us
 	// Because in Qt fonts take some time to initialize properly, we have to delay the call
 	// to adjustIcons a bit in order to give the fonts the necessary time (so we can read out
 	// the actual font details).
-	QTimer::singleShot(0, [this]() { adjustIcons(); });
+	QTimer::singleShot(0, this, [this]() { adjustIcons(); });
 
 	connect(this, SIGNAL(doubleClicked(const QModelIndex &)), this, SLOT(nodeActivated(const QModelIndex &)));
 }
@@ -127,10 +158,10 @@ void UserView::adjustIcons() {
 	// Calculate the icon size for status icons based on font size
 	// This should automaticially adjust size when the user has
 	// display scaling enabled
-	m_iconTotalDimension  = QFontMetrics(font()).height();
-	int iconIconPadding   = 1;
-	int iconIconDimension = m_iconTotalDimension - (2 * iconIconPadding);
-	m_userDelegate->adjustIcons(m_iconTotalDimension, iconIconPadding, iconIconDimension);
+	m_iconTotalDimension = QFontMetrics(font()).height();
+	m_iconIconPadding    = 1;
+	m_iconIconDimension  = m_iconTotalDimension - (2 * m_iconIconPadding);
+	m_userDelegate->adjustIcons(m_iconTotalDimension, m_iconIconPadding, m_iconIconDimension);
 	viewport()->update();
 }
 
@@ -145,8 +176,23 @@ bool UserView::event(QEvent *evt) {
 		QDesktopServices::openUrl(qwtce->href());
 		evt->accept();
 		return true;
+	} else if (evt->type() == QEvent::FontChange || evt->type() == QEvent::StyleChange) {
+		// The status-icon dimensions (and with them the hit-test geometry)
+		// derive from the view font's metrics: re-derive them whenever the
+		// font or the style changes at runtime (e.g. a theme or font-size
+		// change after startup). Deferred like the constructor's initial
+		// call so the new font details are settled, and bound to this view
+		// so a pending refresh dies with it.
+		QTimer::singleShot(0, this, [this]() { adjustIcons(); });
 	}
 	return QTreeView::event(evt);
+}
+
+QStyleOptionViewItem UserView::itemOptionFor(const QModelIndex &idx) const {
+	QStyleOptionViewItem option;
+	initViewItemOption(&option);
+	option.rect = visualRect(idx);
+	return option;
 }
 
 /**
@@ -158,76 +204,33 @@ void UserView::mouseReleaseEvent(QMouseEvent *evt) {
 
 	QModelIndex idx = indexAt(clickPosition);
 	if ((evt->button() == Qt::LeftButton) && idx.isValid()) {
-		UserModel *userModel         = qobject_cast< UserModel * >(model());
-		const ClientUser *clientUser = userModel->getUser(idx);
-		const Channel *channel       = userModel->getChannel(idx);
+		// Hit-test against the very geometry the delegate paints: the
+		// model-provided status-icon list (column 1) decides where the icons
+		// are, and CommentIconRole whether the leading one is the comment
+		// indicator. (Reconstructing icon presence from ClientUser/Channel
+		// flags here used to drift from the painted icons, e.g. for
+		// push-to-mute and listener proxy rows.)
+		const QList< QVariant > iconList = idx.sibling(idx.row(), 1).data(Qt::DisplayRole).toList();
+		const bool hasCommentIcon        = idx.data(UserModel::CommentIconRole).toBool();
 
-		// This is the x offset of the _beginning_ of the comment icon starting from the
-		// right.
-		// Thus if the comment icon is the last icon that is displayed, this is equal to
-		// the negative width of a icon's width (which it is initialized to here). For
-		// every icon that is displayed to the right of the comment icon, we have to subtract
-		// m_iconTotalDimension once.
-		int commentIconPxOffset = -m_iconTotalDimension;
-		bool hasComment         = false;
+		if (hasCommentIcon) {
+			QStyleOptionViewItem option = itemOptionFor(idx);
+			const UserStatusGeometry geometry = UserDelegate::computeGeometry(
+				option, iconList, 0, m_iconTotalDimension, m_iconIconPadding, m_iconIconDimension);
 
-		if (clientUser && !clientUser->qbaCommentHash.isEmpty()) {
-			hasComment = true;
-
-			if (clientUser->bLocalIgnore)
-				commentIconPxOffset -= m_iconTotalDimension;
-			if (clientUser->bRecording)
-				commentIconPxOffset -= m_iconTotalDimension;
-			if (clientUser->bPrioritySpeaker)
-				commentIconPxOffset -= m_iconTotalDimension;
-			if (clientUser->bMute)
-				commentIconPxOffset -= m_iconTotalDimension;
-			if (clientUser->bSuppress)
-				commentIconPxOffset -= m_iconTotalDimension;
-			if (clientUser->bSelfMute)
-				commentIconPxOffset -= m_iconTotalDimension;
-			if (clientUser->bLocalMute)
-				commentIconPxOffset -= m_iconTotalDimension;
-			if (clientUser->bSelfDeaf)
-				commentIconPxOffset -= m_iconTotalDimension;
-			if (clientUser->bDeaf)
-				commentIconPxOffset -= m_iconTotalDimension;
-			if (!clientUser->qsFriendName.isEmpty())
-				commentIconPxOffset -= m_iconTotalDimension;
-			if (clientUser->iId >= 0)
-				commentIconPxOffset -= m_iconTotalDimension;
-
-		} else if (channel && !channel->qbaDescHash.isEmpty()) {
-			hasComment = true;
-
-			switch (channel->m_filterMode) {
-				case ChannelFilterMode::PIN:
-				case ChannelFilterMode::HIDE:
-					commentIconPxOffset -= m_iconTotalDimension;
-					break;
-				case ChannelFilterMode::NORMAL:
-					// NOOP
-					break;
-			}
-
-			if (channel->hasEnterRestrictions) {
-				commentIconPxOffset -= m_iconTotalDimension;
-			}
-		}
-
-		if (hasComment) {
-			QRect r                    = visualRect(idx);
-			const int commentIconPxPos = r.topRight().x() + commentIconPxOffset;
-
-			if ((clickPosition.x() >= commentIconPxPos)
-				&& (clickPosition.x() <= (commentIconPxPos + m_iconTotalDimension))) {
-				// Clicked comment icon
-				QString str = userModel->data(idx, Qt::ToolTipRole).toString();
-				if (str.isEmpty()) {
-					userModel->bClicked = true;
-				} else {
-					QWhatsThis::showText(viewport()->mapToGlobal(r.bottomRight()), str, this);
-					userModel->seenComment(idx);
+			if (geometry.commentIconRect.contains(clickPosition)) {
+				// Clicked the comment icon. Consuming the release here also
+				// suppresses the base-class handling of this click (selection,
+				// clicked() and - on single-click-activation platforms -
+				// activated()); nothing relies on those for comment icons.
+				QString str = idx.data(Qt::ToolTipRole).toString();
+				if (auto *userModel = qobject_cast< UserModel * >(model())) {
+					if (str.isEmpty()) {
+						userModel->bClicked = true;
+					} else {
+						QWhatsThis::showText(viewport()->mapToGlobal(option.rect.bottomRight()), str, this);
+						userModel->seenComment(idx);
+					}
 				}
 				return;
 			}
