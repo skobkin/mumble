@@ -4387,13 +4387,15 @@ void MainWindow::openConfigDialog() {
 			Themes::apply();
 		}
 	});
+	// ConfigDialog::apply() emits settingsAccepted for every accepted
+	// settings change - Apply without closing the dialog, OK (accept() routes
+	// through apply()), and Reset/Restore Defaults followed by either. The
+	// settings-dependent live presentation therefore refreshes through this
+	// single path instead of the post-exec OK-only block.
+	QObject::connect(dlg, &ConfigDialog::settingsAccepted, this, &MainWindow::refreshUiAfterSettingsAccepted);
 
 	if (dlg->exec() == QDialog::Accepted) {
-		setupView(false);
 		showRaiseWindow();
-		updateTransmitModeComboBox(Global::get().s.atTransmit);
-		updateUserModel();
-		emit talkingStatusChanged();
 
 		if (Global::get().s.requireRestartToApply) {
 			if (Global::get().s.requireRestartToApply
@@ -4413,6 +4415,19 @@ void MainWindow::openConfigDialog() {
 	Global::get().inConfigUI = false;
 
 	delete dlg;
+}
+
+void MainWindow::refreshUiAfterSettingsAccepted() {
+	// The refresh set previously performed only after an accepted config
+	// dialog (OK), now delivered on every settings acceptance. setupView's
+	// window-flag helper early-outs on unchanged flags and setMinimal
+	// early-outs, so this is safe to run while the modal dialog is still
+	// open on Apply; toggle_minimize=false means no state save/restore runs.
+	setupView(false);
+	updateTransmitModeComboBox(Global::get().s.atTransmit);
+	updateUserModel();
+	updateAudioToolTips();
+	emit talkingStatusChanged();
 }
 
 void MainWindow::openAudioWizardDialog() {

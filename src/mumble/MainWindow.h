@@ -253,6 +253,16 @@ protected:
 	/// start() returns), so the state is pushed explicitly; the server
 	/// description is read from the already-configured handler.
 	void showConnectionAttemptInHeader();
+
+	/// Re-derives the settings-dependent presentation (mode layout, transmit
+	/// mode combo, PTT button window, model and action/tooltip state) after
+	/// settings were accepted. Connected to ConfigDialog::settingsAccepted,
+	/// so Apply refreshes the live UI without closing the dialog and OK (and
+	/// Reset/Restore Defaults followed by either) refresh through the same
+	/// single path. Contains no dialog-closing concerns (activation, restart
+	/// prompt stay with the OK path) and never emits transmissionModeChanged:
+	/// the combo is only re-synchronized to the settings value.
+	void refreshUiAfterSettingsAccepted();
 	void updateFavoriteButton();
 	void customEvent(QEvent *evt) Q_DECL_OVERRIDE;
 	void findDesiredChannel();
