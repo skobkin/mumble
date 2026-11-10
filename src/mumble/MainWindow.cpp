@@ -2346,7 +2346,11 @@ void MainWindow::on_qteChat_tabPressed() {
 		return;
 	}
 
-	focusNextMainWidget();
+	// Ordinary Tab advances through the window's actual focus chain - the
+	// same mechanism the Backtab handler above uses - so an enabled (live)
+	// chat input hands focus to the voice control bar's chain head. The
+	// native traversal skips hidden and disabled widgets on the way.
+	focusNextChild();
 }
 
 void MainWindow::autocompleteUsername() {

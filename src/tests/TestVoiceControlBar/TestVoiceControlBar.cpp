@@ -13,6 +13,7 @@
 
 #include <QtTest>
 
+#include "CustomElements.h"
 #include "widgets/MUComboBox.h"
 #include "widgets/VoiceControlBar.h"
 
@@ -34,6 +35,16 @@ QIcon testIcon() {
 	pixmap.fill(Qt::darkGreen);
 	return QIcon(pixmap);
 }
+
+/// Host window exposing the protected QWidget::focusNextChild. The live
+/// MainWindow::on_qteChat_tabPressed answers the chat input's tabPressed
+/// signal by calling focusNextChild() on the main window itself; MainWindow
+/// cannot be constructed in a harness, so this host stands in for exactly
+/// that handler role.
+class TabChainHost : public QWidget {
+public:
+	using QWidget::focusNextChild;
+};
 } // namespace
 
 class TestVoiceControlBar : public QObject {
@@ -93,6 +104,12 @@ private slots:
 	void focusPolicies();
 	void focusTraversalChain();
 	void focusEntryWidgetIsChainHead();
+
+	// Connected presentation: Tab in the (enabled) chat input advances into
+	// the bar through the real focus chain - the "@..." autocomplete keeps
+	// precedence, ordinary Tab follows the chain instead of jumping to a
+	// fixed major widget.
+	void chatTabAdvancesIntoBar();
 
 	// Ownership: destroying the bar destroys its widgets, never the actions.
 	void destructionCleansUpOwnedWidgetsOnly();
@@ -834,6 +851,54 @@ void TestVoiceControlBar::focusEntryWidgetIsChainHead() {
 	// at traversal time; case focusTraversalChain verifies the effective
 	// walk for both visibility states).
 	QCOMPARE(m_bar->focusEntryWidget(), static_cast< QWidget * >(m_bar->transmitModeComboBox()));
+}
+
+void TestVoiceControlBar::chatTabAdvancesIntoBar() {
+	// The connected presentation: a real ChatbarTextEdit (enabled - the live
+	// client disables it while disconnected), the bar behind it, and the
+	// cross-boundary chain link setupGui establishes. ChatbarTextEdit
+	// consumes Tab itself and emits tabPressed; the production slot answers
+	// with focusNextChild() on the window, mirrored here through TabChainHost.
+	TabChainHost host;
+	ChatbarTextEdit *chat = new ChatbarTextEdit(&host);
+	QHBoxLayout *layout  = new QHBoxLayout(&host);
+	layout->addWidget(chat);
+	layout->addWidget(m_bar);
+	QWidget::setTabOrder(chat, m_bar->focusEntryWidget());
+	MUComboBox *combo = filledCombo();
+
+	host.resize(800, 200);
+	host.show();
+	chat->setEnabled(true);
+	chat->setFocus();
+	QApplication::processEvents();
+	QCOMPARE(QApplication::focusWidget(), static_cast< QWidget * >(chat));
+
+	QObject::connect(chat, &ChatbarTextEdit::tabPressed, &host, &TabChainHost::focusNextChild);
+
+	// Hidden combo: the walk enters the bar at the mute button.
+	QTest::keyClick(chat, Qt::Key_Tab);
+	QCOMPARE(QApplication::focusWidget(), static_cast< QWidget * >(buttonFor(m_muteAction)));
+
+	// Combo shown (bShowTransmitModeComboBox): it is the chain head the
+	// chat input Tab reaches.
+	combo->setVisible(true);
+	QApplication::processEvents();
+	chat->setFocus();
+	QApplication::processEvents();
+	QCOMPARE(QApplication::focusWidget(), static_cast< QWidget * >(chat));
+	QTest::keyClick(chat, Qt::Key_Tab);
+	QCOMPARE(QApplication::focusWidget(), static_cast< QWidget * >(combo));
+
+	// Drain ChatbarTextEdit's deferred placeholder work while the widgets
+	// are alive (its context-less single-shot must not fire on freed
+	// objects), then detach the bar again so the fixture cleanup can
+	// delete it.
+	for (int i = 0; i < 10; ++i) {
+		QApplication::processEvents();
+	}
+	layout->removeWidget(m_bar);
+	m_bar->setParent(nullptr);
 }
 
 void TestVoiceControlBar::destructionCleansUpOwnedWidgetsOnly() {

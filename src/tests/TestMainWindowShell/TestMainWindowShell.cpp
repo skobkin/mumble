@@ -472,13 +472,16 @@ void TestMainWindowShell::voiceBarPersistentAndTraversal() {
 	QWidget::setTabOrder(shell.chatPanel()->chatInput(), firstButton);
 	QWidget::setTabOrder(firstButton, secondButton);
 
-	// Normal mode. NOTE: ChatbarTextEdit consumes Tab AND Backtab itself
-	// (autocomplete), so focus never advances THROUGH it; the link's
-	// observable effect is Backtab out of the bar's head landing in the chat
-	// input, and Tab out of the log reaching the bar whenever the chat input
-	// cannot take focus - which is exactly the disconnected presentation
-	// (setupGui disables the chat input when not connected), where the bar is
-	// the primary control surface.
+	// Normal mode. NOTE: ChatbarTextEdit consumes Tab AND Backtab itself and
+	// emits tabPressed/backtabPressed instead; MainWindow answers tabPressed
+	// by advancing the real focus chain, so an enabled (connected) chat
+	// input hands focus into the bar (verified with the real bar in
+	// TestVoiceControlBar::chatTabAdvancesIntoBar). The shell-side
+	// guarantees are exercised here: Backtab out of the bar's head lands in
+	// the chat input, and Tab out of the log reaches the bar whenever the
+	// chat input cannot take focus - which is exactly the disconnected
+	// presentation (setupGui disables the chat input when not connected),
+	// where the bar is the primary control surface.
 	shell.setMinimal(false);
 	shell.resize(1000, 700);
 	drainEvents();
