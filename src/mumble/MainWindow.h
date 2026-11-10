@@ -276,7 +276,11 @@ protected:
 	/// newChannelID argument: that signal is emitted BEFORE
 	/// ClientUser::cChannel is re-pointed, so reading the self user there
 	/// would show the previous channel (same consumption pattern as the
-	/// TalkingUI's userMoved handling).
+	/// TalkingUI's userMoved handling). Self mute/deaf and push-to-mute are
+	/// folded in only while a self user exists; with none (disconnected, or
+	/// before synchronization) the bar receives the fully cleared snapshot -
+	/// the buttons keep their action-driven state, the status presentation
+	/// does not.
 	void pushVoiceSnapshot(const Channel *newChannel);
 
 	/// Re-derives the settings-dependent presentation (mode layout, transmit

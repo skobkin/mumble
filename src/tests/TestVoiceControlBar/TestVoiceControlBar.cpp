@@ -74,6 +74,15 @@ private slots:
 	// Snapshot contract.
 	void initialSnapshotIsCleared();
 	void snapshotReplacesStaleIdentityAndStatus();
+
+	// Disconnected snapshot contract (Stage 4 review fix): the cleared
+	// snapshot the live MainWindow pushes with no self user (disconnect,
+	// before synchronization) wipes every trace of the connection's status -
+	// self-only tooltip lines and a transient push-to-mute included - while
+	// the buttons keep their action-driven checked state; a later
+	// synchronized push restores the lines.
+	void disconnectPushClearsSelfAndTransientStatus();
+
 	void statusPrecedenceMatrix();
 	void combinedStatusesTooltipComplete();
 	void pushToMuteIsNotSelfMute();
@@ -318,6 +327,57 @@ void TestVoiceControlBar::snapshotReplacesStaleIdentityAndStatus() {
 	// Identity without a channel shows the name alone.
 	m_bar->updateVoiceStatusSnapshot(snapshotWithName("Bob", QString()));
 	QCOMPARE(m_bar->identityLabel()->text(), QString("Bob"));
+}
+
+void TestVoiceControlBar::disconnectPushClearsSelfAndTransientStatus() {
+	showWide();
+
+	// Connected with every self/transient flag active while the actions
+	// carry their checked state.
+	m_muteAction->setChecked(true);
+	m_deafenAction->setChecked(true);
+	QVERIFY(buttonFor(m_muteAction)->isChecked());
+	QVERIFY(buttonFor(m_deafenAction)->isChecked());
+
+	VoiceControlBar::VoiceStatusSnapshot connected = snapshotWithName("Alice", "Lobby");
+	connected.selfMuted    = true;
+	connected.selfDeafened = true;
+	connected.pushToMute   = true;
+	connected.serverMuted  = true;
+	m_bar->updateVoiceStatusSnapshot(connected);
+	QCOMPARE(m_bar->statusKind(), VoiceControlBar::StatusKind::ServerMuted);
+	QVERIFY(!m_bar->statusToolTip().isEmpty());
+	QVERIFY(!m_bar->identityLabel()->accessibleDescription().isEmpty());
+
+	// What MainWindow pushes with no self user: the default-constructed
+	// snapshot, despite bMute/bDeaf/bPushToMute still being set globally.
+	m_bar->updateVoiceStatusSnapshot(VoiceControlBar::VoiceStatusSnapshot());
+
+	QCOMPARE(m_bar->statusKind(), VoiceControlBar::StatusKind::None);
+	QCOMPARE(m_bar->statusToolTip(), QString());
+	QVERIFY(m_bar->identityLabel()->text().isEmpty());
+	QVERIFY(m_bar->identityLabel()->toolTip().isEmpty());
+	QVERIFY(m_bar->identityLabel()->accessibleDescription().isEmpty());
+	QVERIFY(m_bar->statusLabel()->toolTip().isEmpty());
+	QVERIFY(m_bar->statusIconLabel()->toolTip().isEmpty());
+
+	// The buttons are action projections: the disconnect push never touches
+	// them.
+	QVERIFY(buttonFor(m_muteAction)->isChecked());
+	QVERIFY(buttonFor(m_deafenAction)->isChecked());
+
+	// Reconnect (self user exists again, push-to-mute still held): the
+	// transient status becomes visible again and the tooltip regains its
+	// lines - including the separate self-mute line, which never shows as a
+	// visible status (the buttons own that presentation).
+	VoiceControlBar::VoiceStatusSnapshot resync = snapshotWithName("Alice", "Lobby");
+	resync.selfMuted  = true;
+	resync.pushToMute = true;
+	m_bar->updateVoiceStatusSnapshot(resync);
+	QCOMPARE(m_bar->statusKind(), VoiceControlBar::StatusKind::PushToMute);
+	QVERIFY(!m_bar->statusToolTip().isEmpty());
+	QCOMPARE(m_bar->identityLabel()->accessibleDescription(), m_bar->statusToolTip());
+	QVERIFY(buttonFor(m_muteAction)->isChecked());
 }
 
 void TestVoiceControlBar::statusPrecedenceMatrix() {

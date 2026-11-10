@@ -3713,14 +3713,17 @@ void MainWindow::pushVoiceSnapshot(const Channel *newChannel) {
 		snapshot.serverMuted   = self->bMute;
 		snapshot.serverDeafened = self->bDeaf;
 		snapshot.suppressed    = self->bSuppress;
-	}
 
-	// Self mute/deaf live on the settings (the actions are their
-	// projection); push-to-mute is transient. All three feed only the
-	// complete-status tooltip, never the visible line or button states.
-	snapshot.selfMuted    = Global::get().s.bMute;
-	snapshot.selfDeafened = Global::get().s.bDeaf;
-	snapshot.pushToMute   = Global::get().bPushToMute;
+		// Self mute/deaf live on the settings (the actions are their
+		// projection); push-to-mute is transient. All three feed only the
+		// complete-status tooltip, never the visible line or button states -
+		// and only while synchronized: disconnected, the bar presents the
+		// fully cleared status while the buttons keep their action-driven
+		// checked state.
+		snapshot.selfMuted    = Global::get().s.bMute;
+		snapshot.selfDeafened = Global::get().s.bDeaf;
+		snapshot.pushToMute   = Global::get().bPushToMute;
+	}
 
 	m_voiceBar->updateVoiceStatusSnapshot(snapshot);
 }
