@@ -15,8 +15,10 @@ Compare behavior against the same-base official client where applicable.
       tray icon, tree icons, log lines).
 - [ ] Mute↔deafen coupling in both directions, including `unmuteOnUndeaf`
       (un-deafening does not un-mute when the setting is off).
-- [ ] Audio wizard guard: attempting to mute/deafen with unsuitable audio
-      settings still opens the wizard instead of muting.
+- [ ] Audio wizard guard: while the audio wizard is open, mute/deafen
+      attempts are rejected (the button state snaps back; the wizard is
+      never opened by muting). Verify from every entry point: bar buttons,
+      Self menu, tray, global shortcuts, RPC/DBus.
 - [ ] Settings button opens the config dialog from both normal and minimal
       mode (minimal mode previously had no settings access at all).
 
@@ -39,9 +41,12 @@ Compare behavior against the same-base official client where applicable.
 - [ ] Identity ("user in channel") populates on connect; self channel moves
       update the channel name immediately (the `userMoved` fix); channel
       renames update it; self rename (server-side) updates the identity.
-- [ ] Disconnect clears identity and status to the empty presentation while
-      the mute/deafen buttons keep their self state; reconnect repopulates.
-      Repeat with the server killed under the client (failed reconnect path).
+- [ ] Disconnect clears identity and status to the empty presentation
+      completely - no self-mute/self-deafen tooltip lines and no transient
+      push-to-mute status either - while the mute/deafen buttons keep their
+      self state; reconnect repopulates. Test this while self-muted,
+      self-deafened and push-to-mute is held. Repeat with the server killed
+      under the client (failed reconnect path).
 
 ## Transmission-mode combo
 
@@ -53,6 +58,12 @@ Compare behavior against the same-base official client where applicable.
       in LookConfig takes effect on **Apply** with the dialog still open, on
       **OK**, and after Reset/Restore Defaults + Apply/OK; restart prompt
       behavior unchanged.
+- [ ] With `bShowPTTButtonWindow` enabled: switching into Push-to-Talk (via
+      the combo, `gsCycleTransmitMode`/transmit-mode shortcuts, RPC/DBus)
+      shows the floating PTT window immediately; switching away removes it;
+      toggling the setting in LookConfig syncs it on **Apply**/**OK**
+      through the same path. Verify transitions in both directions from
+      every mode.
 
 ## Modes and geometry
 
@@ -69,10 +80,16 @@ Compare behavior against the same-base official client where applicable.
 - [ ] Tab/Shift+Tab: tree → log → chat input → [combo] → mute → deaf →
       settings in normal mode; tree → [combo] → buttons in minimal mode. The
       combo's hidden state is skipped.
-- [ ] Note: the chat input consumes Tab/Backtab itself (autocomplete), so the
-      bar is reached from the tree side, whenever the chat input is disabled
-      (the disconnected presentation), or with Shift+Tab out of the chain
-      head.
+- [ ] Connected presentation (chat input enabled): Tab in the chat input
+      autocompletes when the text starts with `@`; otherwise focus advances
+      through the real focus chain into the bar's chain head (the live slot
+      routes ordinary Tab through the focus chain, not a fixed jump). The
+      disconnected presentation disables the chat input, so Tab out of the
+      log reaches the bar directly.
+- [ ] F6 cycles the main areas (log → chat input → tree); starting from a
+      voice-bar button or any other non-major widget it begins at the log;
+      in minimal mode the hidden log/chat input are skipped (the tree keeps
+      focus); a disabled area is skipped as well.
 - [ ] Space/Enter activate the focused control; one activation = one trigger.
 
 ## Explicitly NOT claimed by this stage
