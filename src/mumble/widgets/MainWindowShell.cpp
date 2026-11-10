@@ -81,6 +81,26 @@ void MainWindowShell::setHeaderWidget(QWidget *header) {
 	m_headerContainer->setVisible(!m_minimal && header != nullptr);
 }
 
+void MainWindowShell::setVoiceBar(QWidget *bar) {
+	if (m_voiceBar && m_voiceBar != bar) {
+		// deleteLater, not delete: a click arriving through the event queue
+		// may still reference the old bar (same discipline as setHeaderWidget).
+		m_voiceBar->deleteLater();
+		m_voiceBar = nullptr;
+	}
+
+	if (bar) {
+		bar->setParent(this);
+		// The note row stays last-but-one; the control strip is the very
+		// bottom row in both presentation modes.
+		if (QVBoxLayout *root = qobject_cast< QVBoxLayout * >(layout())) {
+			root->addWidget(bar, 0);
+		}
+		bar->show();
+		m_voiceBar = bar;
+	}
+}
+
 QList< int > MainWindowShell::splitterSizes() const {
 	return m_splitter->sizes();
 }

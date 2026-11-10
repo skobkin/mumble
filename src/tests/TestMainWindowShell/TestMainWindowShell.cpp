@@ -19,9 +19,11 @@
 #include "widgets/MainWindowShell.h"
 
 #include <QApplication>
+#include <QHBoxLayout>
 #include <QMainWindow>
 #include <QPointer>
 #include <QSplitter>
+#include <QToolButton>
 
 class TestMainWindowShell : public QObject {
 	Q_OBJECT
@@ -65,6 +67,13 @@ private slots:
 	// widget test: it depends on the offscreen platform's focus state, which
 	// the QMainWindow used by minimalShrinkInsideWindow disturbs.
 	void tabOrderTraversal();
+
+	// The persistent voice control bar row (Stage 4): a stand-in strip
+	// installed through setVoiceBar stays visible in normal AND minimal
+	// mode, does not break the compact-geometry contract, and joins the
+	// keyboard chain through the cross-boundary link the live MainWindow
+	// establishes (chat input -> the bar's focus head).
+	void voiceBarPersistentAndTraversal();
 
 	// Production nesting: as the central widget of a QMainWindow the shell's
 	// layout synchronization must drop the WINDOW's minimum width, not just
@@ -409,6 +418,125 @@ void TestMainWindowShell::tabOrderTraversal() {
 	// asserted up to it)
 	QTest::keyClick(log, Qt::Key_Tab);
 	QCOMPARE(QApplication::focusWidget(), static_cast< QWidget * >(chat));
+}
+
+void TestMainWindowShell::voiceBarPersistentAndTraversal() {
+	UserView *tree       = new UserView(nullptr);
+	LogTextBrowser *log  = new LogTextBrowser();
+	ChatbarTextEdit *chat = new ChatbarTextEdit();
+
+	MainWindowShell shell(tree, log, chat);
+
+	// Stand-in control strip: a plain QWidget with two focusable buttons.
+	// The shell must stay free of VoiceControlBar/Global dependencies, so
+	// the real bar's behavior is reduced to exactly what the shell itself
+	// has to guarantee: a bottom row that survives mode switches.
+	QWidget *voiceBar         = new QWidget(nullptr);
+	QHBoxLayout *barLayout    = new QHBoxLayout(voiceBar);
+	QToolButton *firstButton  = new QToolButton(voiceBar);
+	QToolButton *secondButton = new QToolButton(voiceBar);
+	barLayout->addWidget(firstButton);
+	barLayout->addWidget(secondButton);
+
+	shell.setVoiceBar(voiceBar);
+	shell.resize(1000, 700);
+	shell.show();
+	drainEvents();
+
+	// Visible in normal mode and persistent across mode switches (never
+	// touched by setMinimal).
+	QVERIFY(voiceBar->isVisible());
+	shell.setMinimal(true);
+	drainEvents();
+	QVERIFY(voiceBar->isVisible());
+	shell.setMinimal(false);
+	drainEvents();
+	QVERIFY(voiceBar->isVisible());
+
+	// The bar row must not break the compact-geometry contract: in minimal
+	// mode the shell can still shrink below the normal-mode minimum.
+	QSplitter *splitter     = qobject_cast< QSplitter * >(splitterOf(&shell));
+	const int handleWidth   = splitter->handleWidth() > 0 ? splitter->handleWidth() : 5;
+	const int normalMinimum = tree->minimumWidth() + shell.chatPanel()->minimumWidth() + handleWidth;
+	shell.setMinimal(true);
+	drainEvents();
+	const int compactWidth = shell.minimumSizeHint().width();
+	QVERIFY(compactWidth < normalMinimum);
+	shell.resize(compactWidth, 300);
+	drainEvents();
+	QCOMPARE(shell.width(), compactWidth);
+	QVERIFY(voiceBar->isVisible());
+
+	// The cross-boundary focus link the live MainWindow establishes after
+	// installing the bar (chat input -> the bar's focus chain head).
+	QWidget::setTabOrder(shell.chatPanel()->chatInput(), firstButton);
+	QWidget::setTabOrder(firstButton, secondButton);
+
+	// Normal mode. NOTE: ChatbarTextEdit consumes Tab AND Backtab itself
+	// (autocomplete), so focus never advances THROUGH it; the link's
+	// observable effect is Backtab out of the bar's head landing in the chat
+	// input, and Tab out of the log reaching the bar whenever the chat input
+	// cannot take focus - which is exactly the disconnected presentation
+	// (setupGui disables the chat input when not connected), where the bar is
+	// the primary control surface.
+	shell.setMinimal(false);
+	shell.resize(1000, 700);
+	drainEvents();
+
+	shell.chatPanel()->chatInput()->setEnabled(false);
+	tree->setFocus();
+	drainEvents();
+	QCOMPARE(QApplication::focusWidget(), static_cast< QWidget * >(tree));
+	QTest::keyClick(tree, Qt::Key_Tab);
+	QCOMPARE(QApplication::focusWidget(), static_cast< QWidget * >(log));
+	QTest::keyClick(log, Qt::Key_Tab);
+	QCOMPARE(QApplication::focusWidget(), static_cast< QWidget * >(firstButton));
+	QTest::keyClick(firstButton, Qt::Key_Tab);
+	QCOMPARE(QApplication::focusWidget(), static_cast< QWidget * >(secondButton));
+
+	// Shift+Tab reverses the whole walk.
+	QTest::keyClick(secondButton, Qt::Key_Backtab);
+	QCOMPARE(QApplication::focusWidget(), static_cast< QWidget * >(firstButton));
+	QTest::keyClick(firstButton, Qt::Key_Backtab);
+	QCOMPARE(QApplication::focusWidget(), static_cast< QWidget * >(log));
+	QTest::keyClick(log, Qt::Key_Backtab);
+	QCOMPARE(QApplication::focusWidget(), static_cast< QWidget * >(tree));
+
+	// With the chat input enabled again, Backtab out of the bar's head lands
+	// in it: the cross-boundary link itself.
+	shell.chatPanel()->chatInput()->setEnabled(true);
+	firstButton->setFocus();
+	drainEvents();
+	QCOMPARE(QApplication::focusWidget(), static_cast< QWidget * >(firstButton));
+	QTest::keyClick(firstButton, Qt::Key_Backtab);
+	QCOMPARE(QApplication::focusWidget(), static_cast< QWidget * >(shell.chatPanel()->chatInput()));
+
+	// Minimal mode: the chat panel is hidden and skipped, so the tree hands
+	// focus straight into the bar.
+	shell.setMinimal(true);
+	drainEvents();
+	tree->setFocus();
+	drainEvents();
+	QCOMPARE(QApplication::focusWidget(), static_cast< QWidget * >(tree));
+	QTest::keyClick(tree, Qt::Key_Tab);
+	QCOMPARE(QApplication::focusWidget(), static_cast< QWidget * >(firstButton));
+	QTest::keyClick(firstButton, Qt::Key_Tab);
+	QCOMPARE(QApplication::focusWidget(), static_cast< QWidget * >(secondButton));
+	QTest::keyClick(secondButton, Qt::Key_Backtab);
+	QCOMPARE(QApplication::focusWidget(), static_cast< QWidget * >(firstButton));
+	QTest::keyClick(firstButton, Qt::Key_Backtab);
+	QCOMPARE(QApplication::focusWidget(), static_cast< QWidget * >(tree));
+
+	// Replacing the bar retires the previous one. deleteLater events are not
+	// delivered by a same-nesting-level processEvents() pass, so the deferred
+	// deletes are flushed explicitly.
+	QPointer< QWidget > retiredBar(voiceBar);
+	QWidget *replacement = new QWidget(nullptr);
+	shell.setVoiceBar(replacement);
+	drainEvents();
+	QVERIFY(replacement->isVisible());
+	QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+	QVERIFY(retiredBar.isNull());
 }
 
 QTEST_MAIN(TestMainWindowShell)

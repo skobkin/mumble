@@ -185,13 +185,9 @@
    <addaction name="separator"/>
    <addaction name="qaMoveBack"/>
    <addaction name="separator"/>
-   <addaction name="qaAudioMute"/>
-   <addaction name="qaAudioDeaf"/>
    <addaction name="qaRecording"/>
    <addaction name="separator"/>
    <addaction name="qaSelfComment"/>
-   <addaction name="separator"/>
-   <addaction name="qaConfigDialog"/>
    <addaction name="separator"/>
    <addaction name="qaFilterToggle"/>
    <addaction name="separator"/>

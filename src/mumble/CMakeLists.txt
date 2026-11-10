@@ -335,6 +335,8 @@ set(MUMBLE_SOURCES
 	"widgets/TrayIcon.h"
 	"widgets/ResponsiveImageDialog.cpp"
 	"widgets/ResponsiveImageDialog.h"
+	"widgets/VoiceControlBar.cpp"
+	"widgets/VoiceControlBar.h"
 
 
 	"${SHARED_SOURCE_DIR}/ACL.cpp"

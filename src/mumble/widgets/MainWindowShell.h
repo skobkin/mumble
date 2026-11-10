@@ -49,6 +49,14 @@ public:
 	/// clears it. The header is only visible in normal mode.
 	void setHeaderWidget(QWidget *header);
 
+	/// Adopts \p bar as the persistent bottom control strip, appended after
+	/// the minimal-view note row. Unlike the header, the bar is not tied to
+	/// a presentation mode: it stays visible in normal and minimal mode, so
+	/// it is never touched by setMinimal and its minimum flows into the
+	/// layout constraints of both modes. A previously installed bar is
+	/// scheduled for deletion. Passing nullptr only removes a previous bar.
+	void setVoiceBar(QWidget *bar);
+
 	QList< int > splitterSizes() const;
 	void setSplitterSizes(const QList< int > &sizes);
 
@@ -73,6 +81,10 @@ private:
 	QWidget *m_headerContainer;
 	QSplitter *m_splitter;
 	QLabel *m_note;
+	/// The persistent bottom control strip (VoiceControlBar in the live
+	/// window; a plain QWidget stand-in in tests). Untyped on purpose: the
+	/// shell has no Global dependency and must stay isolated-test friendly.
+	QWidget *m_voiceBar = nullptr;
 	UserView *m_tree;
 	ChatPanel *m_chatPanel;
 	/// The chat panel's minimum width in normal mode. Released while the

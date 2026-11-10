@@ -64,6 +64,7 @@
 #include "UserView.h"
 #include "widgets/ConnectionHeader.h"
 #include "widgets/MainWindowShell.h"
+#include "widgets/VoiceControlBar.h"
 
 #ifdef Q_OS_WIN
 #	include "TaskList.h"
@@ -224,6 +225,12 @@ MainWindow::MainWindow(QWidget *p)
 	// directly).
 	QObject::connect(this, &MainWindow::serverSynchronized, this, &MainWindow::updateConnectionHeader);
 	QObject::connect(this, &MainWindow::disconnectedFromServer, this, &MainWindow::updateConnectionHeader);
+
+	// The voice control bar's snapshot is re-derived at every point that also
+	// refreshes the tray icon's status derivation, and cleared when the
+	// connection is gone (null self user -> cleared snapshot).
+	QObject::connect(this, &MainWindow::talkingStatusChanged, this, &MainWindow::updateVoiceControlStatus);
+	QObject::connect(this, &MainWindow::disconnectedFromServer, this, &MainWindow::updateVoiceControlStatus);
 
 	QObject::connect(this, &MainWindow::channelStateChanged, this, &MainWindow::on_channelStateChanged);
 
@@ -556,6 +563,26 @@ void MainWindow::setupGui() {
 	QObject::connect(pmModel, &UserModel::channelAdded, this, &MainWindow::updateConnectionHeader);
 	QObject::connect(pmModel, &UserModel::channelRemoved, this, &MainWindow::updateConnectionHeader);
 
+	// The voice bar's channel display follows self channel moves and channel
+	// renames. userMoved is emitted BEFORE ClientUser::cChannel is re-pointed
+	// (UserModel::moveUser emits at the top, before the item move commits the
+	// reassignment), so the new channel is resolved from the signal's
+	// newChannelID argument instead of reading the not-yet-moved self user
+	// (same consumption pattern as the TalkingUI). Moves of other users are
+	// ignored: the slot re-derives from the local user only.
+	QObject::connect(pmModel, &UserModel::userMoved, this,
+					 [this](unsigned int sessionID, const std::optional< unsigned int > &, unsigned int newChannelID) {
+						 if (sessionID == Global::get().uiSession) {
+							 pushVoiceSnapshot(Channel::get(newChannelID));
+						 }
+					 });
+	QObject::connect(pmModel, &UserModel::channelRenamed, this, [this](unsigned int channelID) {
+		ClientUser *self = ClientUser::get(Global::get().uiSession);
+		if (self && self->cChannel && self->cChannel->iId == channelID) {
+			updateVoiceControlStatus();
+		}
+	});
+
 	qaAudioMute->setChecked(Global::get().s.bMute);
 	qaAudioDeaf->setChecked(Global::get().s.bDeaf);
 
@@ -599,6 +626,15 @@ void MainWindow::setupGui() {
 	m_shell = new MainWindowShell(qtvUsers, qteLog, qteChat, this);
 	m_header = new ConnectionHeader(qaServerConnect, qaServerDisconnect, qaServerInformation, qaSearch);
 	m_shell->setHeaderWidget(m_header);
+	// Persistent voice control strip (normal AND minimal mode). Pure
+	// presentation: the bar binds the existing actions and displays pushed
+	// snapshots; the handlers above remain the single authority.
+	m_voiceBar = new VoiceControlBar(qaAudioMute, qaAudioDeaf, qaConfigDialog);
+	m_shell->setVoiceBar(m_voiceBar);
+	// Continue the shell's keyboard chain (tree -> log -> chat input) into
+	// the bar's internal chain through its head. The bar itself never takes
+	// focus (NoFocus container), so the link must target a child.
+	QWidget::setTabOrder(qteChat, m_voiceBar->focusEntryWidget());
 	setCentralWidget(m_shell);
 
 	delete qdwLog;
@@ -633,7 +669,10 @@ void MainWindow::setupGui() {
 	qcbTransmitMode->addItem(tr("Voice Activity"));
 	qcbTransmitMode->addItem(tr("Push-to-Talk"));
 
-	qaTransmitModeSeparator = qtIconToolbar->insertSeparator(qaConfigDialog);
+	// qaConfigDialog's toolbar slot is gone (its controls now live in the
+	// persistent voice bar); the separator+combo are anchored to the still
+	// present filter toggle so they keep their position.
+	qaTransmitModeSeparator = qtIconToolbar->insertSeparator(qaFilterToggle);
 	qaTransmitMode          = qtIconToolbar->insertWidget(qaTransmitModeSeparator, qcbTransmitMode);
 
 	connect(qcbTransmitMode, SIGNAL(activated(int)), this, SLOT(qcbTransmitMode_activated(int)));
@@ -653,6 +692,9 @@ void MainWindow::setupGui() {
 	// Initial (disconnected) snapshot; lifecycle refreshes follow through the
 	// serverConnected/serverSynchronized/disconnectedFromServer hooks.
 	updateConnectionHeader();
+
+	// Ditto for the voice bar's identity/status snapshot.
+	updateVoiceControlStatus();
 
 #ifdef Q_OS_MACOS
 	setWindowOpacity(1.0f);
@@ -3665,6 +3707,45 @@ void MainWindow::showConnectionAttemptInHeader() {
 	}
 
 	m_header->updateConnectionSnapshot(ConnectionHeader::ConnectionState::Connecting, description, 0, 0);
+}
+
+void MainWindow::updateVoiceControlStatus() {
+	pushVoiceSnapshot(nullptr);
+}
+
+void MainWindow::pushVoiceSnapshot(const Channel *newChannel) {
+	if (!m_voiceBar) {
+		return;
+	}
+
+	// Everything is resolved at push time; nothing is cached between
+	// refreshes. A null self user (before synchronization or after
+	// disconnect) produces the cleared snapshot wholesale.
+	VoiceControlBar::VoiceStatusSnapshot snapshot;
+
+	ClientUser *self = ClientUser::get(Global::get().uiSession);
+	if (self) {
+		snapshot.userName = self->qsName;
+		// The channel override covers the userMoved emission, which fires
+		// before cChannel is re-pointed (see the declaration).
+		const Channel *channel = newChannel ? newChannel : self->cChannel;
+		if (channel) {
+			snapshot.channelName = channel->qsName;
+		}
+		snapshot.talkState     = self->tsState;
+		snapshot.serverMuted   = self->bMute;
+		snapshot.serverDeafened = self->bDeaf;
+		snapshot.suppressed    = self->bSuppress;
+	}
+
+	// Self mute/deaf live on the settings (the actions are their
+	// projection); push-to-mute is transient. All three feed only the
+	// complete-status tooltip, never the visible line or button states.
+	snapshot.selfMuted    = Global::get().s.bMute;
+	snapshot.selfDeafened = Global::get().s.bDeaf;
+	snapshot.pushToMute   = Global::get().bPushToMute;
+
+	m_voiceBar->updateVoiceStatusSnapshot(snapshot);
 }
 
 void MainWindow::serverConnected() {

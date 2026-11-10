@@ -52,6 +52,7 @@ class ListenerVolumeSlider;
 class UserLocalVolumeSlider;
 class ConnectionHeader;
 class MainWindowShell;
+class VoiceControlBar;
 class UiStatePersistence;
 
 struct ShortcutTarget;
@@ -128,6 +129,12 @@ public:
 	/// Connection status strip inside the shell's header container (normal
 	/// mode only). Created during setupGui; owned through the shell.
 	ConnectionHeader *m_header = nullptr;
+
+	/// Persistent bottom control strip (normal AND minimal mode). Created
+	/// during setupGui; owned through the shell. Presentation only: the bar
+	/// binds the existing audio/config actions and displays snapshots pushed
+	/// by updateVoiceControlStatus(); it never derives state itself.
+	VoiceControlBar *m_voiceBar = nullptr;
 
 	/// Fork-side UI persistence policy (sidecar store + guarded restore/capture
 	/// protocol). Owns no widgets; MainWindow translates between it and the
@@ -253,6 +260,23 @@ protected:
 	/// start() returns), so the state is pushed explicitly; the server
 	/// description is read from the already-configured handler.
 	void showConnectionAttemptInHeader();
+
+	/// Re-derives the local user's identity and voice-status snapshot and
+	/// pushes it to the voice control bar. The ClientUser is resolved fresh
+	/// on every call (never cached); a null self user (not synchronized,
+	/// disconnected) yields the cleared snapshot. Connected to
+	/// talkingStatusChanged (local talking/mute/deaf/priority/recording
+	/// changes, self mute/deaf toggles, push-to-mute, config acceptance,
+	/// self rename) and to disconnectedFromServer.
+	void updateVoiceControlStatus();
+
+	/// Shared snapshot filler. \p newChannel, when set, overrides the
+	/// channel name with the channel resolved from UserModel::userMoved's
+	/// newChannelID argument: that signal is emitted BEFORE
+	/// ClientUser::cChannel is re-pointed, so reading the self user there
+	/// would show the previous channel (same consumption pattern as the
+	/// TalkingUI's userMoved handling).
+	void pushVoiceSnapshot(const Channel *newChannel);
 
 	/// Re-derives the settings-dependent presentation (mode layout, transmit
 	/// mode combo, PTT button window, model and action/tooltip state) after

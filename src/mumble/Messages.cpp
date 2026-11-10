@@ -534,6 +534,13 @@ void MainWindow::msgUserState(const MumbleProto::UserState &msg) {
 														   .arg(Log::formatClientUser(pDst, Log::Target, oldName),
 																Log::formatClientUser(pDst, Log::Target)));
 			}
+			if (pSelf && pDst == pSelf) {
+				// UserModel::renameUser emits no signal of its own; the
+				// renamed identity must still reach the voice control bar
+				// (the same piggyback emission the self mute/deafen handlers
+				// use for the tray icon).
+				emit talkingStatusChanged();
+			}
 		}
 	}
 
