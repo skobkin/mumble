@@ -1198,6 +1198,24 @@ void MainWindow::updateImagePath(QString filepath) const {
 	Global::get().s.qsImagePath = fi.absolutePath();
 }
 
+void MainWindow::updatePTTButtonWindow() {
+	// The floating PTT window exists only while the setting is enabled AND
+	// the active transmit mode is push-to-talk. Created lazily and kept
+	// across repeated calls; anything else tears it down. Deliberately free
+	// of window layout/geometry logic, so it is cheap enough to run on every
+	// transmission-mode change.
+	if (Global::get().s.bShowPTTButtonWindow && Global::get().s.atTransmit == Settings::PushToTalk) {
+		if (!qwPTTButtonWidget) {
+			qwPTTButtonWidget = new PTTButtonWidget();
+			connect(qwPTTButtonWidget, SIGNAL(triggered(bool, QVariant)), SLOT(on_PushToTalk_triggered(bool, QVariant)));
+		}
+		qwPTTButtonWidget->show();
+	} else if (qwPTTButtonWidget) {
+		qwPTTButtonWidget->deleteLater();
+		qwPTTButtonWidget = nullptr;
+	}
+}
+
 void MainWindow::setTransmissionMode(Settings::AudioTransmit mode) {
 	if (Global::get().s.atTransmit != mode) {
 		Global::get().s.atTransmit = mode;
@@ -1215,6 +1233,11 @@ void MainWindow::setTransmissionMode(Settings::AudioTransmit mode) {
 		}
 
 		emit transmissionModeChanged(mode);
+
+		// Keep the floating push-to-talk window in sync with the new mode.
+		// Settings acceptance (bShowPTTButtonWindow, Reset defaults) reaches
+		// this through setupView's call of the same helper.
+		updatePTTButtonWindow();
 	}
 }
 
@@ -1643,22 +1666,9 @@ void MainWindow::setupView(bool toggle_minimize) {
 	// configured to do so, otherwise hide it.
 	qcbTransmitMode->setVisible(Global::get().s.bShowTransmitModeComboBox);
 
-	// If activated show the PTT window
-	if (Global::get().s.bShowPTTButtonWindow && Global::get().s.atTransmit == Settings::PushToTalk) {
-		if (qwPTTButtonWidget) {
-			qwPTTButtonWidget->show();
-		} else {
-			qwPTTButtonWidget = new PTTButtonWidget();
-			qwPTTButtonWidget->show();
-			connect(qwPTTButtonWidget, SIGNAL(triggered(bool, QVariant)),
-					SLOT(on_PushToTalk_triggered(bool, QVariant)));
-		}
-	} else {
-		if (qwPTTButtonWidget) {
-			qwPTTButtonWidget->deleteLater();
-			qwPTTButtonWidget = nullptr;
-		}
-	}
+	// If activated show the PTT window. Also runs on transmission-mode
+	// changes and (through this path) on settings acceptance.
+	updatePTTButtonWindow();
 }
 
 void MainWindow::on_qaServerConnect_triggered(bool autoconnect) {

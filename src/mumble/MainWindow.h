@@ -169,6 +169,13 @@ public:
 	void msgBox(QString msg);
 	void setOnTop(bool top);
 	void updateAudioToolTips();
+	/// Shows or hides the floating push-to-talk button window according to
+	/// the current settings (bShowPTTButtonWindow and PTT transmit mode).
+	/// Runs during window setup, on settings acceptance (through setupView)
+	/// and on every transmission-mode change, so mode switches through the
+	/// combo box, global shortcuts or the API keep the floating window in
+	/// sync without re-deriving any window layout.
+	void updatePTTButtonWindow();
 	void updateUserModel();
 	void focusNextMainWidget();
 	QPair< QByteArray, QImage > openImageFile();
