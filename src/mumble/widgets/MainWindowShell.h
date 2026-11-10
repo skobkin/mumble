@@ -77,6 +77,17 @@ public:
 	void setNoteVisible(bool visible);
 	void setNoteText(const QString &text);
 
+	/// Moves keyboard focus to the next main interaction area, cycling
+	/// combined log → chat input → user tree (the order the main window's
+	/// F6 has always used). Areas that cannot take focus in the current
+	/// presentation are skipped (the chat panel with log and chat input is
+	/// hidden in minimal mode; disabled areas are skipped too), and focus
+	/// held by any other widget (e.g. a button inside the persistent voice
+	/// bar) starts the cycle from the beginning instead of being treated as
+	/// an error. Returns the area that received focus, or nullptr when no
+	/// area is eligible.
+	QWidget *focusNextMainArea();
+
 private:
 	QWidget *m_headerContainer;
 	QSplitter *m_splitter;

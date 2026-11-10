@@ -163,3 +163,38 @@ void MainWindowShell::setNoteVisible(bool visible) {
 void MainWindowShell::setNoteText(const QString &text) {
 	m_note->setText(text);
 }
+
+QWidget *MainWindowShell::focusNextMainArea() {
+	QWidget *mainAreas[] = {
+		m_chatPanel->log(),
+		m_chatPanel->chatInput(),
+		m_tree,
+	};
+	const int numAreas = sizeof(mainAreas) / sizeof(mainAreas[0]);
+
+	// The focus widget of the window the shell lives in. It may be null (no
+	// focus yet) or belong to any part of the window (e.g. a button inside
+	// the persistent voice bar); both unrecognized cases start the cycle
+	// from the beginning. The ancestor check runs in the right direction: a
+	// main area CONTAINING the focus widget counts as the current position,
+	// never the other way around.
+	QWidget *focus = window()->focusWidget();
+	int startIndex = 0;
+	for (int i = 0; i < numAreas; ++i) {
+		if (mainAreas[i] == focus || mainAreas[i]->isAncestorOf(focus)) {
+			startIndex = (i + 1) % numAreas;
+			break;
+		}
+	}
+
+	// Skip areas that cannot take focus in the current presentation; the
+	// full loop covering every area once also implements the wrap-around.
+	for (int step = 0; step < numAreas; ++step) {
+		QWidget *area = mainAreas[(startIndex + step) % numAreas];
+		if (area->isVisible() && area->isEnabled()) {
+			area->setFocus();
+			return area;
+		}
+	}
+	return nullptr;
+}

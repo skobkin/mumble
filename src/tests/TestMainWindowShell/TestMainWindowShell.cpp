@@ -75,6 +75,13 @@ private slots:
 	// establishes (chat input -> the bar's focus head).
 	void voiceBarPersistentAndTraversal();
 
+	// F6-style major-area cycling (Stage 4 review fix): focus inside the
+	// persistent bar starts from the beginning instead of tripping the old
+	// MainWindow assertion; the ancestor check runs in the right direction;
+	// areas hidden (minimal mode hides the chat panel with log and chat
+	// input) or disabled are skipped.
+	void focusCyclingCoversBarAndMinimal();
+
 	// Production nesting: as the central widget of a QMainWindow the shell's
 	// layout synchronization must drop the WINDOW's minimum width, not just
 	// the shell's own (QMainWindowLayout is the constraint path real toggles
@@ -540,6 +547,66 @@ void TestMainWindowShell::voiceBarPersistentAndTraversal() {
 	QVERIFY(replacement->isVisible());
 	QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
 	QVERIFY(retiredBar.isNull());
+}
+
+void TestMainWindowShell::focusCyclingCoversBarAndMinimal() {
+	UserView *tree       = new UserView(nullptr);
+	LogTextBrowser *log  = new LogTextBrowser();
+	ChatbarTextEdit *chat = new ChatbarTextEdit();
+
+	MainWindowShell shell(tree, log, chat);
+
+	// The same stand-in strip shape as voiceBarPersistentAndTraversal: one
+	// focusable button inside the persistent bar row.
+	QWidget *voiceBar      = new QWidget(nullptr);
+	QHBoxLayout *barLayout = new QHBoxLayout(voiceBar);
+	QToolButton *barButton = new QToolButton(voiceBar);
+	barLayout->addWidget(barButton);
+	shell.setVoiceBar(voiceBar);
+
+	shell.resize(1000, 700);
+	shell.show();
+	drainEvents();
+
+	// Focus inside the bar - the case the previous MainWindow-side
+	// implementation died on (Q_ASSERT: focused widget not among the main
+	// areas). The cycle starts from the beginning and runs
+	// log -> chat input -> tree -> log.
+	barButton->setFocus();
+	drainEvents();
+	QCOMPARE(QApplication::focusWidget(), static_cast< QWidget * >(barButton));
+	QCOMPARE(shell.focusNextMainArea(), static_cast< QWidget * >(log));
+	QCOMPARE(QApplication::focusWidget(), static_cast< QWidget * >(log));
+	QCOMPARE(shell.focusNextMainArea(), static_cast< QWidget * >(chat));
+	QCOMPARE(shell.focusNextMainArea(), static_cast< QWidget * >(tree));
+	QCOMPARE(shell.focusNextMainArea(), static_cast< QWidget * >(log));
+
+	// No focus widget at all must be safe and restart at the log.
+	QApplication::focusWidget()->clearFocus();
+	drainEvents();
+	QCOMPARE(shell.focusNextMainArea(), static_cast< QWidget * >(log));
+
+	// Minimal mode: the chat panel (log + chat input) is hidden, so the
+	// cycle can only ever land on the tree - coming from the tree as well as
+	// from the bar.
+	shell.setMinimal(true);
+	drainEvents();
+	tree->setFocus();
+	drainEvents();
+	QCOMPARE(shell.focusNextMainArea(), static_cast< QWidget * >(tree));
+	barButton->setFocus();
+	drainEvents();
+	QCOMPARE(shell.focusNextMainArea(), static_cast< QWidget * >(tree));
+
+	// A disabled area is skipped as well: chat input disabled in normal
+	// mode, the cycle crosses straight from the log to the tree.
+	shell.setMinimal(false);
+	drainEvents();
+	chat->setEnabled(false);
+	log->setFocus();
+	drainEvents();
+	QCOMPARE(shell.focusNextMainArea(), static_cast< QWidget * >(tree));
+	chat->setEnabled(true);
 }
 
 QTEST_MAIN(TestMainWindowShell)

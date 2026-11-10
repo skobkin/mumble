@@ -911,29 +911,11 @@ void MainWindow::keyPressEvent(QKeyEvent *e) {
 /// The main widgets are qteLog (the log view), qteChat (chat input bar)
 /// and qtvUsers (users tree view).
 void MainWindow::focusNextMainWidget() {
-	QWidget *mainFocusWidgets[] = {
-		qteLog,
-		qteChat,
-		qtvUsers,
-	};
-	const int numMainFocusWidgets = sizeof(mainFocusWidgets) / sizeof(mainFocusWidgets[0]);
-
-	int currentMainFocusWidgetIndex = -1;
-
-	QWidget *w = focusWidget();
-	for (int i = 0; i < numMainFocusWidgets; i++) {
-		QWidget *mainFocusWidget = mainFocusWidgets[i];
-		if (w == mainFocusWidget || w->isAncestorOf(mainFocusWidget)) {
-			currentMainFocusWidgetIndex = i;
-			break;
-		}
-	}
-
-	Q_ASSERT(currentMainFocusWidgetIndex != -1);
-
-	int nextMainFocusWidgetIndex = (currentMainFocusWidgetIndex + 1) % numMainFocusWidgets;
-	QWidget *nextMainFocusWidget = mainFocusWidgets[nextMainFocusWidgetIndex];
-	nextMainFocusWidget->setFocus();
+	// The cycle - including the safe handling of focus held anywhere else
+	// (e.g. inside the persistent voice bar) and the skipping of areas that
+	// cannot take focus in the current presentation - is implemented and
+	// tested on the shell.
+	m_shell->focusNextMainArea();
 }
 
 void MainWindow::updateAudioToolTips() {
