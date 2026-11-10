@@ -230,9 +230,10 @@ protected:
 
 	PTTButtonWidget *qwPTTButtonWidget;
 
+	/// Non-owning: the transmission-mode selector created inside the voice
+	/// control bar (never reparented); MainWindow fills its items and owns
+	/// the activation handling. Same lifetime discipline as m_header.
 	MUComboBox *qcbTransmitMode;
-	QAction *qaTransmitMode;
-	QAction *qaTransmitModeSeparator;
 
 	Search::SearchDialog *m_searchDialog = nullptr;
 

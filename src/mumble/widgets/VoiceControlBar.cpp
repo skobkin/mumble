@@ -6,6 +6,7 @@
 #include "widgets/VoiceControlBar.h"
 
 #include "SvgIcon.h"
+#include "widgets/MUComboBox.h"
 
 #include <QAction>
 #include <QFontMetrics>
@@ -160,6 +161,7 @@ VoiceControlBar::VoiceControlBar(QAction *muteAction, QAction *deafenAction, QAc
 	: QWidget(parent), m_identityLabel(new ElidedLabel(this)), m_statusIconLabel(new QLabel(this)),
 	  m_statusLabel(new ElidedLabel(this)), m_muteButton(new QToolButton(this)),
 	  m_deafenButton(new QToolButton(this)), m_configureButton(new QToolButton(this)),
+	  m_transmitModeComboBox(new MUComboBox(this)),
 	  m_statusIcons(static_cast< int >(StatusKind::Shouting) + 1) {
 	// The bar itself is never a tab stop; traversal enters its children
 	// through focusEntryWidget().
@@ -187,12 +189,20 @@ VoiceControlBar::VoiceControlBar(QAction *muteAction, QAction *deafenAction, QAc
 	SvgIcon::addSvgPixmapsToIcon(m_statusIcons[static_cast< int >(StatusKind::Shouting)],
 								QLatin1String("skin:talking_alt.svg"));
 
+	// The transmission-mode selector is born in its final container and is
+	// never reparented or wrapped in a QWidgetAction, so no toolbar-action
+	// teardown can ever destroy it. The host owns contents, activation
+	// handling and visibility; the combo starts hidden.
+	m_transmitModeComboBox->setSizeAdjustPolicy(QComboBox::AdjustToContents);
+	m_transmitModeComboBox->hide();
+
 	QHBoxLayout *layout = new QHBoxLayout(this);
 	layout->setContentsMargins(6, 2, 6, 2);
 	layout->setSpacing(4);
 	layout->addWidget(m_identityLabel, 2);
 	layout->addWidget(m_statusIconLabel, 0);
 	layout->addWidget(m_statusLabel, 1);
+	layout->addWidget(m_transmitModeComboBox, 0);
 
 	// The buttons delegate everything to the existing actions; this class
 	// never triggers or rewrites them (same contract as ConnectionHeader).
@@ -204,9 +214,11 @@ VoiceControlBar::VoiceControlBar(QAction *muteAction, QAction *deafenAction, QAc
 		layout->addWidget(button, 0);
 	}
 
-	// Explicit focus chain so Tab order does not depend on creation order.
-	// (The transmission-mode combo joins at the head of this chain when it
-	// is introduced.)
+	// Explicit focus chain so Tab order does not depend on creation order:
+	// combo -> mute -> deaf -> config. The combo is the chain head; while it
+	// is hidden, focus traversal skips it and effectively starts at the mute
+	// button.
+	QWidget::setTabOrder(m_transmitModeComboBox, m_muteButton);
 	QWidget::setTabOrder(m_muteButton, m_deafenButton);
 	QWidget::setTabOrder(m_deafenButton, m_configureButton);
 }
@@ -233,7 +245,11 @@ QString VoiceControlBar::statusToolTip() const {
 }
 
 QWidget *VoiceControlBar::focusEntryWidget() const {
-	return m_muteButton;
+	return m_transmitModeComboBox;
+}
+
+MUComboBox *VoiceControlBar::transmitModeComboBox() const {
+	return m_transmitModeComboBox;
 }
 
 QLabel *VoiceControlBar::identityLabel() const {

@@ -13,6 +13,7 @@
 
 #include <QtTest>
 
+#include "widgets/MUComboBox.h"
 #include "widgets/VoiceControlBar.h"
 
 #include <QAction>
@@ -68,12 +69,22 @@ private slots:
 	void talkingNotInferredFromActionStates();
 	void snapshotPushDoesNotTriggerActions();
 
+	// The transmission-mode selector: one instance, born in the bar, host
+	// fills it; programmatic index sync never emits activated (the no-
+	// feedback-loop guarantee), user selection emits exactly once, and the
+	// visibility gate is the host's alone.
+	void comboSingleInstance();
+	void comboIndicesAndRefreshWithoutActivation();
+	void comboUserSelectionEmitsActivatedOnce();
+	void comboVisibilityGate();
+
 	// Accessibility: explicit names (mnemonic-stripped), complete status
 	// mirrored into the identity label's accessibleDescription.
 	void accessibleNames();
 
 	// Responsive geometry: both text areas elide, buttons stay fully visible,
-	// no overlap, no uncontrolled minimum growth.
+	// no overlap, no uncontrolled minimum growth. With the combo shown, the
+	// achievable floor is its runtime minimum; below-floor requests clamp.
 	void responsiveLayoutAtSupportedWidths();
 	void responsiveLayoutLargeFonts();
 	void minimumWidthFloor();
@@ -105,11 +116,25 @@ private:
 		return snapshot;
 	}
 
-	/// Asserts the layout contract at the bar's current size: every child
-	// fully inside the bar rect, children mutually disjoint, all three
-	// buttons visible and at least at their minimum, and the row height
-	// staying within ~2.5x a tool button's hint.
+	/// Asserts the layout contract at the bar's current size: every visible
+	// child fully inside the bar rect, visible children mutually disjoint,
+	// all three buttons visible and at least at their minimum, and the row
+	// height staying within ~2.5x a tool button's hint. Hidden children
+	// (e.g. the combo before the host shows it) occupy no layout space and
+	// are skipped.
 	void verifyLayoutContract() const;
+
+	/// The bar's combo with the production items, mirroring the host's
+	/// setupGui role.
+	MUComboBox *filledCombo() const {
+		MUComboBox *combo = m_bar->transmitModeComboBox();
+		if (combo->count() == 0) {
+			combo->addItem(QStringLiteral("Continuous"));
+			combo->addItem(QStringLiteral("Voice Activity"));
+			combo->addItem(QStringLiteral("Push-to-Talk"));
+		}
+		return combo;
+	}
 
 	/// Shows the bar at a generous size where short texts fit unelided.
 	void showWide() {
@@ -487,6 +512,82 @@ void TestVoiceControlBar::snapshotPushDoesNotTriggerActions() {
 	QCOMPARE(configSpy.count(), 0);
 }
 
+void TestVoiceControlBar::comboSingleInstance() {
+	showWide();
+
+	const auto combos = m_bar->findChildren< MUComboBox * >();
+	QCOMPARE(combos.size(), 1);
+	QCOMPARE(m_bar->transmitModeComboBox(), combos.first());
+	QCOMPARE(combos.first()->parentWidget(), static_cast< QWidget * >(m_bar));
+	// Born hidden: only the host's visibility gate ever shows it.
+	QVERIFY(!combos.first()->isVisible());
+}
+
+void TestVoiceControlBar::comboIndicesAndRefreshWithoutActivation() {
+	showWide();
+
+	MUComboBox *combo = filledCombo();
+	QCOMPARE(combo->count(), 3);
+	QCOMPARE(combo->currentText(), QString("Continuous"));
+
+	QSignalSpy activatedSpy(combo, QOverload< int >::of(&QComboBox::activated));
+
+	// The refresh path (updateTransmitModeComboBox): programmatic index
+	// changes never emit activated, so setTransmissionMode stays the sole
+	// transmissionModeChanged emitter and no feedback loop can form.
+	combo->setCurrentIndex(1);
+	QCOMPARE(combo->currentText(), QString("Voice Activity"));
+	combo->setCurrentIndex(2);
+	QCOMPARE(combo->currentText(), QString("Push-to-Talk"));
+	combo->setCurrentIndex(0);
+
+	QCOMPARE(activatedSpy.count(), 0);
+}
+
+void TestVoiceControlBar::comboUserSelectionEmitsActivatedOnce() {
+	showWide();
+
+	MUComboBox *combo = filledCombo();
+	combo->setVisible(true);
+	combo->setFocus();
+	QApplication::processEvents();
+	QCOMPARE(QApplication::focusWidget(), static_cast< QWidget * >(combo));
+
+	QSignalSpy activatedSpy(combo, QOverload< int >::of(&QComboBox::activated));
+	QSignalSpy muteSpy(m_muteAction, &QAction::triggered);
+	QSignalSpy deafenSpy(m_deafenAction, &QAction::triggered);
+	QSignalSpy configSpy(m_configAction, &QAction::triggered);
+
+	// Keyboard selection: Down opens the popup and highlights the next
+	// item, Return commits it (the popup's view holds focus while open).
+	QTest::keyClick(combo, Qt::Key_Down);
+	QTest::keyClick(QApplication::focusWidget(), Qt::Key_Return);
+
+	QCOMPARE(activatedSpy.count(), 1);
+	QCOMPARE(activatedSpy.at(0).at(0).toInt(), 1);
+	QCOMPARE(combo->currentIndex(), 1);
+
+	// Selecting a transmit mode never triggers the bar's other actions.
+	QCOMPARE(muteSpy.count(), 0);
+	QCOMPARE(deafenSpy.count(), 0);
+	QCOMPARE(configSpy.count(), 0);
+}
+
+void TestVoiceControlBar::comboVisibilityGate() {
+	showWide();
+
+	MUComboBox *combo = filledCombo();
+	QVERIFY(!combo->isVisible());
+
+	combo->setVisible(true);
+	QApplication::processEvents();
+	QVERIFY(combo->isVisible());
+
+	combo->setVisible(false);
+	QApplication::processEvents();
+	QVERIFY(!combo->isVisible());
+}
+
 void TestVoiceControlBar::accessibleNames() {
 	showWide();
 
@@ -505,19 +606,25 @@ void TestVoiceControlBar::accessibleNames() {
 }
 
 void TestVoiceControlBar::verifyLayoutContract() const {
-	// Every direct child fully inside the bar rect (no clipping).
+	// Every visible direct child fully inside the bar rect (no clipping);
+	// hidden children occupy no layout space.
 	const QRect barRect = m_bar->rect();
+	QList< QWidget * > visibleChildren;
 	const auto children = m_bar->findChildren< QWidget * >(QString(), Qt::FindDirectChildrenOnly);
 	QVERIFY(!children.isEmpty());
 	for (QWidget *child : children) {
+		if (!child->isVisible()) {
+			continue;
+		}
+		visibleChildren << child;
 		QVERIFY2(barRect.contains(child->geometry()), qPrintable(QStringLiteral("child %1 clipped at width %2")
 																	   .arg(child->objectName())
 																	   .arg(m_bar->width())));
 	}
-	// No overlap between children.
-	for (int i = 0; i < children.size(); ++i) {
-		for (int j = i + 1; j < children.size(); ++j) {
-			QVERIFY2(!children.at(i)->geometry().intersects(children.at(j)->geometry()),
+	// No overlap between visible children.
+	for (int i = 0; i < visibleChildren.size(); ++i) {
+		for (int j = i + 1; j < visibleChildren.size(); ++j) {
+			QVERIFY2(!visibleChildren.at(i)->geometry().intersects(visibleChildren.at(j)->geometry()),
 					 "overlapping children");
 		}
 	}
@@ -561,6 +668,29 @@ void TestVoiceControlBar::responsiveLayoutAtSupportedWidths() {
 		QVERIFY2(m_bar->statusLabel()->text() != fullStatus,
 				 qPrintable(QStringLiteral("status not elided at %1").arg(width)));
 	}
+
+	// Combo shown: the one documented unavoidable floor (a QComboBox cannot
+	// elide, so its contents width joins the minimum). Exercise the
+	// achievable runtime floor and above it; requesting an impossible
+	// 150 px must clamp to the floor with the layout still valid.
+	MUComboBox *combo = filledCombo();
+	combo->setVisible(true);
+	QApplication::processEvents();
+
+	const int floorWidth = m_bar->minimumSizeHint().width();
+	QVERIFY2(floorWidth > 150, "the shown combo must raise the floor above the combo-less widths");
+
+	for (int width : { floorWidth, floorWidth + 20 }) {
+		m_bar->resize(width, m_bar->sizeHint().height());
+		QApplication::processEvents();
+		verifyLayoutContract();
+		QVERIFY(combo->isVisible());
+	}
+
+	m_bar->resize(150, m_bar->sizeHint().height());
+	QApplication::processEvents();
+	QVERIFY(m_bar->width() >= floorWidth);
+	verifyLayoutContract();
 }
 
 void TestVoiceControlBar::responsiveLayoutLargeFonts() {
@@ -579,6 +709,18 @@ void TestVoiceControlBar::responsiveLayoutLargeFonts() {
 	for (int width : { 240, 300 }) {
 		m_bar->resize(width, m_bar->sizeHint().height());
 		m_bar->show();
+		QApplication::processEvents();
+		verifyLayoutContract();
+	}
+
+	// With the combo shown the floor follows the larger font; clamping and
+	// non-overlap still hold at the font-adjusted runtime floor.
+	MUComboBox *combo = filledCombo();
+	combo->setVisible(true);
+	QApplication::processEvents();
+	const int fontFloor = m_bar->minimumSizeHint().width();
+	for (int width : { fontFloor, fontFloor + 20 }) {
+		m_bar->resize(width, m_bar->sizeHint().height());
 		QApplication::processEvents();
 		verifyLayoutContract();
 	}
@@ -605,16 +747,19 @@ void TestVoiceControlBar::focusPolicies() {
 	for (QToolButton *button : m_bar->findChildren< QToolButton * >()) {
 		QVERIFY(button->focusPolicy() != Qt::NoFocus);
 	}
+	QVERIFY(m_bar->transmitModeComboBox()->focusPolicy() != Qt::NoFocus);
 }
 
 void TestVoiceControlBar::focusTraversalChain() {
 	// The hosting pattern MainWindow uses: a sibling editor linked to the
-	// bar's focus chain head, exactly like setTabOrder(qteChat, ...).
+	// bar's focus chain head (the combo), exactly like
+	// setTabOrder(qteChat, ...).
 	QWidget host;
 	QLineEdit *lineEdit = new QLineEdit(&host);
 	QVBoxLayout *layout = new QVBoxLayout(&host);
 	layout->addWidget(lineEdit);
 	layout->addWidget(m_bar);
+	MUComboBox *combo = filledCombo();
 	QWidget::setTabOrder(lineEdit, m_bar->focusEntryWidget());
 
 	host.resize(800, 200);
@@ -627,7 +772,8 @@ void TestVoiceControlBar::focusTraversalChain() {
 	QToolButton *deafButton   = buttonFor(m_deafenAction);
 	QToolButton *configButton = buttonFor(m_configAction);
 
-	// Tab: editor -> mute -> deaf -> config -> wrap to the editor.
+	// Hidden combo: skipped by traversal, so the walk matches the combo-less
+	// chain: editor -> mute -> deaf -> config -> wrap to the editor.
 	QTest::keyClick(lineEdit, Qt::Key_Tab);
 	QCOMPARE(QApplication::focusWidget(), static_cast< QWidget * >(muteButton));
 	QTest::keyClick(muteButton, Qt::Key_Tab);
@@ -647,6 +793,34 @@ void TestVoiceControlBar::focusTraversalChain() {
 	QTest::keyClick(muteButton, Qt::Key_Backtab);
 	QCOMPARE(QApplication::focusWidget(), static_cast< QWidget * >(lineEdit));
 
+	// Combo shown: it joins as the first stop in the bar.
+	combo->setVisible(true);
+	QApplication::processEvents();
+	lineEdit->setFocus();
+	QApplication::processEvents();
+
+	QTest::keyClick(lineEdit, Qt::Key_Tab);
+	QCOMPARE(QApplication::focusWidget(), static_cast< QWidget * >(combo));
+	QTest::keyClick(combo, Qt::Key_Tab);
+	QCOMPARE(QApplication::focusWidget(), static_cast< QWidget * >(muteButton));
+	QTest::keyClick(muteButton, Qt::Key_Tab);
+	QCOMPARE(QApplication::focusWidget(), static_cast< QWidget * >(deafButton));
+	QTest::keyClick(deafButton, Qt::Key_Tab);
+	QCOMPARE(QApplication::focusWidget(), static_cast< QWidget * >(configButton));
+	QTest::keyClick(configButton, Qt::Key_Tab);
+	QCOMPARE(QApplication::focusWidget(), static_cast< QWidget * >(lineEdit));
+
+	QTest::keyClick(lineEdit, Qt::Key_Backtab);
+	QCOMPARE(QApplication::focusWidget(), static_cast< QWidget * >(configButton));
+	QTest::keyClick(configButton, Qt::Key_Backtab);
+	QCOMPARE(QApplication::focusWidget(), static_cast< QWidget * >(deafButton));
+	QTest::keyClick(deafButton, Qt::Key_Backtab);
+	QCOMPARE(QApplication::focusWidget(), static_cast< QWidget * >(muteButton));
+	QTest::keyClick(muteButton, Qt::Key_Backtab);
+	QCOMPARE(QApplication::focusWidget(), static_cast< QWidget * >(combo));
+	QTest::keyClick(combo, Qt::Key_Backtab);
+	QCOMPARE(QApplication::focusWidget(), static_cast< QWidget * >(lineEdit));
+
 	// The bar left the host's layout on destruction of the host only;
 	// detach it again so the fixture cleanup can delete it.
 	layout->removeWidget(m_bar);
@@ -656,9 +830,10 @@ void TestVoiceControlBar::focusTraversalChain() {
 void TestVoiceControlBar::focusEntryWidgetIsChainHead() {
 	showWide();
 
-	// C2 form: the head is the mute button (the bar is complete and
-	// traversable without any transmission combo).
-	QCOMPARE(m_bar->focusEntryWidget(), static_cast< QWidget * >(buttonFor(m_muteAction)));
+	// The head is the transmission-mode combo (hidden widgets are skipped
+	// at traversal time; case focusTraversalChain verifies the effective
+	// walk for both visibility states).
+	QCOMPARE(m_bar->focusEntryWidget(), static_cast< QWidget * >(m_bar->transmitModeComboBox()));
 }
 
 void TestVoiceControlBar::destructionCleansUpOwnedWidgetsOnly() {
@@ -666,14 +841,16 @@ void TestVoiceControlBar::destructionCleansUpOwnedWidgetsOnly() {
 
 	QPointer< VoiceControlBar > barPointer(m_bar);
 	QPointer< QToolButton > buttonPointer(buttonFor(m_muteAction));
+	QPointer< MUComboBox > comboPointer(m_bar->transmitModeComboBox());
 
 	delete m_bar;
 	m_bar = nullptr;
 
-	// The bar's widgets died with it; the actions (owned by whoever injected
-	// them - MainWindow, or this fixture) survive.
+	// The bar's widgets (combo included) died with it; the actions (owned by
+	// whoever injected them - MainWindow, or this fixture) survive.
 	QVERIFY(barPointer.isNull());
 	QVERIFY(buttonPointer.isNull());
+	QVERIFY(comboPointer.isNull());
 	QCOMPARE(m_muteAction->text(), QString("M&ute Self"));
 	QCOMPARE(m_deafenAction->text(), QString("&Deafen Self"));
 }

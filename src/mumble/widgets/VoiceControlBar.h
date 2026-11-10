@@ -15,6 +15,7 @@
 class QAction;
 class QLabel;
 class QToolButton;
+class MUComboBox;
 
 /// Persistent bottom control strip of the redesigned main window: mute,
 /// deafen and settings tool buttons that are pure projections of the existing
@@ -95,8 +96,19 @@ public:
 	QString statusToolTip() const;
 
 	/// The head of the bar's focus chain, for the embedding code's
-	/// QWidget::setTabOrder() link. The bar itself never takes focus.
+	/// QWidget::setTabOrder() link. The bar itself never takes focus; the
+	/// head is the transmission-mode combo (a hidden widget is skipped by
+	/// focus traversal, so while the combo is hidden traversal effectively
+	/// starts at the mute button).
 	QWidget *focusEntryWidget() const;
+
+	/// The transmission-mode selector, born inside the bar and never
+	/// reparented (constructing a widget inside a QWidgetAction-owned
+	/// toolbar slot would tie its lifetime to that action). The bar adds no
+	/// items and connects nothing: the host fills the items, owns the
+	/// activated handling and applies the visibility setting; the combo
+	/// starts hidden.
+	MUComboBox *transmitModeComboBox() const;
 
 	/// The identity label (elides its full text when narrow).
 	QLabel *identityLabel() const;
@@ -113,6 +125,7 @@ private:
 	QToolButton *m_muteButton;
 	QToolButton *m_deafenButton;
 	QToolButton *m_configureButton;
+	MUComboBox *m_transmitModeComboBox;
 	QVector< QIcon > m_statusIcons;
 	VoiceStatusSnapshot m_snapshot;
 	StatusKind m_statusKind = StatusKind::None;

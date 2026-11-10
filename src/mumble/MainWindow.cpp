@@ -661,19 +661,16 @@ void MainWindow::setupGui() {
 	connect(qtvUsers->selectionModel(), SIGNAL(currentChanged(const QModelIndex &, const QModelIndex &)),
 			SLOT(qtvUserCurrentChanged(const QModelIndex &, const QModelIndex &)));
 
-	// QtCreator and uic.exe do not allow adding arbitrary widgets
-	// such as a MUComboBox to a QToolbar, even though they are supported.
-	qcbTransmitMode = new MUComboBox(qtIconToolbar);
+	// The transmission-mode selector lives in the persistent voice bar
+	// (visible in normal AND minimal mode). MainWindow keeps ownership of
+	// the contents and the activation handling; the combo itself is born in
+	// the bar and never reparented, so no QWidgetAction teardown path can
+	// ever destroy it.
+	qcbTransmitMode = m_voiceBar->transmitModeComboBox();
 	qcbTransmitMode->setObjectName(QLatin1String("qcbTransmitMode"));
 	qcbTransmitMode->addItem(tr("Continuous"));
 	qcbTransmitMode->addItem(tr("Voice Activity"));
 	qcbTransmitMode->addItem(tr("Push-to-Talk"));
-
-	// qaConfigDialog's toolbar slot is gone (its controls now live in the
-	// persistent voice bar); the separator+combo are anchored to the still
-	// present filter toggle so they keep their position.
-	qaTransmitModeSeparator = qtIconToolbar->insertSeparator(qaFilterToggle);
-	qaTransmitMode          = qtIconToolbar->insertWidget(qaTransmitModeSeparator, qcbTransmitMode);
 
 	connect(qcbTransmitMode, SIGNAL(activated(int)), this, SLOT(qcbTransmitMode_activated(int)));
 
@@ -1660,15 +1657,9 @@ void MainWindow::setupView(bool toggle_minimize) {
 		move(geom.x(), geom.y());
 	}
 
-	// Display the Transmit Mode Dropdown, if configured to do so, otherwise
-	// hide it.
-	if (Global::get().s.bShowTransmitModeComboBox) {
-		qaTransmitMode->setVisible(true);
-		qaTransmitModeSeparator->setVisible(true);
-	} else {
-		qaTransmitMode->setVisible(false);
-		qaTransmitModeSeparator->setVisible(false);
-	}
+	// Display the Transmit Mode Dropdown in the persistent voice bar, if
+	// configured to do so, otherwise hide it.
+	qcbTransmitMode->setVisible(Global::get().s.bShowTransmitModeComboBox);
 
 	// If activated show the PTT window
 	if (Global::get().s.bShowPTTButtonWindow && Global::get().s.atTransmit == Settings::PushToTalk) {
