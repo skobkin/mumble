@@ -1019,23 +1019,43 @@ QImage LogDocument::decodeDataUrlImage(const QUrl &url) const {
 	QString encoded = url.toString(QUrl::FullyEncoded);
 	encoded.remove(QLatin1Char('\n')).remove(QLatin1Char('\r'));
 
-	// The payload follows the (possibly re-encoded) "base64," marker.
+	// RFC 2397: data:[<mediatype>][;base64],<payload>. The base64 flag has
+	// its own path: the payload is percent-encoded base64 text.
 	static const QLatin1String base64Marker("base64,");
 	qsizetype payloadStart = encoded.indexOf(base64Marker);
-	if (payloadStart < 0) {
-		static const QLatin1String base64MarkerEncoded("base64%2C");
-		payloadStart = encoded.indexOf(base64MarkerEncoded);
-		if (payloadStart < 0) {
-			return QImage();
-		}
-		payloadStart += base64MarkerEncoded.size();
-	} else {
+	if (payloadStart >= 0) {
 		payloadStart += base64Marker.size();
+		const QByteArray decoded =
+			QByteArray::fromBase64(QByteArray::fromPercentEncoding(encoded.mid(payloadStart).toLatin1()));
+		return QImage::fromData(decoded);
+	}
+	static const QLatin1String base64MarkerEncoded("base64%2C");
+	payloadStart = encoded.indexOf(base64MarkerEncoded);
+	if (payloadStart >= 0) {
+		payloadStart += base64MarkerEncoded.size();
+		const QByteArray decoded =
+			QByteArray::fromBase64(QByteArray::fromPercentEncoding(encoded.mid(payloadStart).toLatin1()));
+		return QImage::fromData(decoded);
 	}
 
-	const QByteArray decoded =
-		QByteArray::fromBase64(QByteArray::fromPercentEncoding(encoded.mid(payloadStart).toLatin1()));
-	return QImage::fromData(decoded);
+	// Without the flag the payload IS the percent-encoded image. The
+	// pre-Stage-5 LogDocument deferred these URLs to Qt's own decoder
+	// (QTextDocument::loadResource -> qDecodeDataUrl), so they must keep
+	// decoding here: RichTextEditor renders foreign HTML through a
+	// LogDocument, not only the console views. The payload starts after
+	// the first comma (plain or re-encoded), and QImage::fromData sniffs
+	// the format exactly like the old handler path did. A percent-encoded
+	// payload can never contain the base64 markers itself (every special
+	// byte is escaped), so the branches cannot trade places.
+	qsizetype comma              = encoded.indexOf(QLatin1Char(','));
+	const qsizetype commaEncoded = encoded.indexOf(QLatin1String("%2C"));
+	if (commaEncoded >= 0 && (comma < 0 || commaEncoded < comma)) {
+		comma = commaEncoded + 2;
+	}
+	if (comma < 0) {
+		return QImage();
+	}
+	return QImage::fromData(QByteArray::fromPercentEncoding(encoded.mid(comma + 1).toLatin1()));
 }
 
 void LogDocument::setBlockBudget(int budget) {

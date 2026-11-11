@@ -124,6 +124,14 @@ private slots:
 	// all (the guarded screen-geometry lookup).
 	void validHtmlWorksWithoutMainWindow();
 
+	// data: images WITHOUT the base64 flag (raw percent-encoded payload)
+	// keep decoding: the pre-Stage-5 LogDocument deferred them to Qt's own
+	// decoder, and RichTextEditor still renders foreign HTML through a
+	// LogDocument - once through the console rendering path, once through a
+	// bare document the way RichTextHtmlEdit uses it.
+	void nonBase64DataImagesRender();
+	void nonBase64DataImagesInRichTextDocument();
+
 	// Scroll preservation: a foreign entry keeps the reader's scroll
 	// position; an own entry scrolls to the bottom.
 	void scrollRestoredForForeignEntriesOnly();
@@ -188,6 +196,18 @@ private:
 	}
 
 	LogConsoleView::RenderSettings settings(int margins = 3) const { return { margins, true }; }
+
+	/// A green 4x4 PNG as an RFC 2397 data: URL without the base64 flag
+	/// (raw percent-encoded image bytes).
+	QUrl nonBase64DataImageUrl() const {
+		QImage img(4, 4, QImage::Format_RGB32);
+		img.fill(Qt::green);
+		QByteArray png;
+		QBuffer buf(&png);
+		buf.open(QIODevice::WriteOnly);
+		img.save(&buf, "PNG");
+		return QUrl(QString::fromLatin1("data:image/png,") + QString::fromLatin1(png.toPercentEncoding()));
+	}
 };
 
 void TestLogPresentation::viewOwnsDocumentAndPolicies() {
@@ -376,6 +396,40 @@ void TestLogPresentation::validHtmlWorksWithoutMainWindow() {
 	const QString result = Log::validHtml(QLatin1String("<p><b>bold</b> text</p>"));
 	QVERIFY(!result.isEmpty());
 	QVERIFY(result.contains(QLatin1String("bold")));
+}
+
+void TestLogPresentation::nonBase64DataImagesRender() {
+	LogConsoleView view;
+	const QUrl url = nonBase64DataImageUrl();
+
+	view.appendEntry(QDateTime::currentDateTime(),
+					 QString::fromLatin1("<p>raw <img src=\"%1\" /></p>").arg(url.toString()), false, settings());
+
+	// Full-size decode, not the external-image 1x1 placeholder (and not a
+	// broken/empty resource).
+	const QVariant resource = view.document()->resource(QTextDocument::ImageResource, url);
+	QImage decoded          = qvariant_cast< QImage >(resource);
+	if (decoded.isNull()) {
+		decoded = QImage::fromData(resource.toByteArray());
+	}
+	QCOMPARE(decoded.width(), 4);
+	QCOMPARE(decoded.height(), 4);
+}
+
+void TestLogPresentation::nonBase64DataImagesInRichTextDocument() {
+	// RichTextHtmlEdit owns a bare LogDocument and renders arbitrary pasted
+	// HTML through it; the URL family it can encounter is the same.
+	const QUrl url = nonBase64DataImageUrl();
+	LogDocument document;
+	document.setHtml(QString::fromLatin1("<p><img src=\"%1\" /></p>").arg(url.toString()));
+
+	const QVariant resource = document.resource(QTextDocument::ImageResource, url);
+	QImage decoded          = qvariant_cast< QImage >(resource);
+	if (decoded.isNull()) {
+		decoded = QImage::fromData(resource.toByteArray());
+	}
+	QCOMPARE(decoded.width(), 4);
+	QCOMPARE(decoded.height(), 4);
 }
 
 void TestLogPresentation::scrollRestoredForForeignEntriesOnly() {
