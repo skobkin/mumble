@@ -12,6 +12,7 @@
 #include <QtCore/QDate>
 #include <QtCore/QDateTime>
 #include <QtCore/QString>
+#include <QtCore/QVector>
 
 /// A log destination: a LogTextBrowser that owns its LogDocument and knows how
 /// one console entry is rendered into it.
@@ -59,7 +60,41 @@ public:
 	/// Forwards the log block limit to the owned document.
 	void setLogBlockLimit(int limit);
 
+	/// Clears the console by replacing the document wholesale, so the
+	/// resource cache and all eviction bookkeeping are released with it
+	/// (Qt has no API to purge a document's resource cache). Date state
+	/// reseeds like a fresh view.
+	void clearConsole();
+	/// Rebuilds the document from the retained entry sources, discarding all
+	/// stale resource-cache keys with the old document. Emitted
+	/// automatically through the document's compactionRecommended signal
+	/// once stale keys exceed the resource-key budget; content and scroll
+	/// are preserved.
+	void compact();
+
+private slots:
+	void onEntriesTrimmed(int count);
+
 private:
+	/// One rendered entry, kept for budget-bounded compaction rebuilds.
+	/// Sources are dropped when their entry is trimmed or the console is
+	/// cleared, so the list is never larger than what the document shows.
+	struct EntrySource {
+		QDateTime timestamp;
+		QString consoleHtml;
+		bool ownMessage;
+		RenderSettings settings;
+	};
+
+	void connectDocument(LogDocument *doc);
+
+	QVector< EntrySource > m_retainedSources;
+	/// Cached stylesheet so document swaps (clearConsole, compact) keep the
+	/// applied theme (QTextDocument has no defaultStyleSheet getter).
+	QString m_appliedStyleSheet;
+	/// Guards re-entrancy while compact() rebuilds.
+	bool m_inCompaction = false;
+
 	/// The date of the most recently appended entry. Seeded with the
 	/// construction date to mirror the former Log::qdDate seeding: the very
 	/// first entry of a session gets no "[Date changed]" separator.

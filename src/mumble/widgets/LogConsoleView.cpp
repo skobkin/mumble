@@ -7,6 +7,7 @@
 
 #include <QLocale>
 #include <QRegularExpression>
+#include <QScrollBar>
 #include <QTextBlock>
 #include <QTextCursor>
 #include <QTextDocument>
@@ -16,9 +17,16 @@
 LogConsoleView::LogConsoleView(QWidget *p) : LogTextBrowser(p), m_lastEntryDate(QDate::currentDate()) {
 	// Each destination owns the document it renders into: the widget is the
 	// single place that decides which document console entries land in.
-	setDocument(new LogDocument(this));
+	LogDocument *doc = new LogDocument(this);
+	setDocument(doc);
 	setContextMenuPolicy(Qt::CustomContextMenu);
 	setOpenLinks(false);
+	connectDocument(doc);
+}
+
+void LogConsoleView::connectDocument(LogDocument *doc) {
+	connect(doc, &LogDocument::entriesTrimmed, this, &LogConsoleView::onEntriesTrimmed);
+	connect(doc, &LogDocument::compactionRecommended, this, &LogConsoleView::compact);
 }
 
 bool LogConsoleView::isChatMessageType(Log::MsgType mt) {
@@ -64,6 +72,9 @@ void LogConsoleView::appendEntry(const QDateTime &dt, const QString &console, bo
 
 	if (m_lastEntryDate != dt.date()) {
 		m_lastEntryDate = dt.date();
+		// Date-separator frames are tagged so the document's budget
+		// accounting can tell them apart from message frames.
+		qttf.setProperty(LogDocument::FrameRoleProperty, LogDocument::DateFrameRole);
 		tc.insertFrame(qttf);
 		// Log::tr keeps this string in the translation context it has always
 		// had, even though the rendering moved into this widget.
@@ -89,6 +100,8 @@ void LogConsoleView::appendEntry(const QDateTime &dt, const QString &console, bo
 		qttf.setBorderStyle(QTextFrameFormat::BorderStyle_Dashed);
 	}
 
+	// Message frames carry the entry-role tag (see the date frame above).
+	qttf.setProperty(LogDocument::FrameRoleProperty, LogDocument::MessageFrameRole);
 	tc.insertFrame(qttf);
 
 	const QString timeString = dt.time().toString(QLatin1String(settings.use24HourClock ? "HH:mm:ss" : "hh:mm:ss AP"));
@@ -101,15 +114,131 @@ void LogConsoleView::appendEntry(const QDateTime &dt, const QString &console, bo
 	// Set the line height of the trailing blank line to zero
 	tc.setBlockFormat(bf);
 
+	// Record the entry for budget-bounded compaction rebuilds, enforce the
+	// whole-entry block budget (may trim the oldest entries), and re-decode
+	// any image references whose bytes were evicted earlier. The just-inserted
+	// frame is never a trim victim (the newest entry is always kept), so this
+	// ordering is safe.
+	m_retainedSources.append(EntrySource{ dt, console, ownMessage, settings });
+	if (LogDocument *doc = qobject_cast< LogDocument * >(document())) {
+		doc->enforceBlockBudget();
+		const QList< QTextFrame * > frames = doc->rootFrame()->childFrames();
+		for (int i = static_cast< int >(frames.size()) - 1; i >= 0; --i) {
+			if (frames.at(i)->frameFormat().intProperty(LogDocument::FrameRoleProperty)
+				== LogDocument::MessageFrameRole) {
+				doc->rehydrateImagesInRange(frames.at(i)->firstPosition() - 1, frames.at(i)->lastPosition() + 1);
+				break;
+			}
+		}
+
+		// Compact only after finishing the append: swapping the document from
+		// inside the eviction above would invalidate it mid-use (the fresh
+		// document is rebuilt from the retained sources, which already
+		// include the entry appended here).
+		if (doc->compactionDue()) {
+			compact();
+		}
+	}
+
 	if (restoreScroll) {
 		setLogScroll(oldscrollvalue);
 	}
 }
 
 void LogConsoleView::applyTheme(const QString &styleSheet) {
+	// Cached: document swaps (clearConsole, compact) must keep the theme and
+	// QTextDocument offers no defaultStyleSheet getter.
+	m_appliedStyleSheet = styleSheet;
 	document()->setDefaultStyleSheet(styleSheet);
 }
 
 void LogConsoleView::setLogBlockLimit(int limit) {
-	document()->setMaximumBlockCount(limit);
+	if (LogDocument *doc = qobject_cast< LogDocument * >(document())) {
+		doc->setBlockBudget(limit);
+	}
+}
+
+void LogConsoleView::clearConsole() {
+	LogDocument *old   = qobject_cast< LogDocument * >(document());
+	LogDocument *fresh = new LogDocument(this);
+	if (old) {
+		fresh->setBlockBudget(old->blockBudget());
+	}
+	fresh->setDefaultStyleSheet(m_appliedStyleSheet);
+
+	m_retainedSources.clear();
+	setDocument(fresh);
+	connectDocument(fresh);
+	if (old && old != fresh) {
+		delete old;
+	}
+
+	// Reseed like a fresh view: the next entry gets no leading separator for
+	// today (the former Log::qdDate survived QTextEdit::clear() with the same
+	// effect, since post-clear entries always carry the current date).
+	m_lastEntryDate = QDate::currentDate();
+}
+
+void LogConsoleView::compact() {
+	if (m_inCompaction) {
+		return;
+	}
+	m_inCompaction = true;
+
+	LogDocument *old = qobject_cast< LogDocument * >(document());
+	if (old) {
+		// Preserve the reader's position across the swap (ratio-clamped).
+		QScrollBar *bar   = verticalScrollBar();
+		const qreal ratio = bar->maximum() > 0 ? qreal(bar->value()) / qreal(bar->maximum()) : 1.0;
+		const int budget  = old->blockBudget();
+		const bool leadingDateFrame =
+			!old->rootFrame()->childFrames().isEmpty()
+			&& old->rootFrame()->childFrames().constFirst()->frameFormat().intProperty(LogDocument::FrameRoleProperty)
+				   == LogDocument::DateFrameRole;
+		const QVector< EntrySource > sources = m_retainedSources;
+
+		LogDocument *fresh = new LogDocument(this);
+		fresh->setBlockBudget(budget);
+		fresh->setDefaultStyleSheet(m_appliedStyleSheet);
+
+		setDocument(fresh);
+		connectDocument(fresh);
+		m_retainedSources.clear();
+
+		// Regenerate the leading separator state exactly as it was: a leading
+		// date frame is reproduced by seeding the date with the day before the
+		// oldest retained entry; a leading message frame by seeding with that
+		// entry's own date (no separator).
+		if (sources.isEmpty()) {
+			m_lastEntryDate = QDate::currentDate();
+		} else if (leadingDateFrame) {
+			m_lastEntryDate = sources.constFirst().timestamp.date().addDays(-1);
+		} else {
+			m_lastEntryDate = sources.constFirst().timestamp.date();
+		}
+
+		for (const EntrySource &source : sources) {
+			appendEntry(source.timestamp, source.consoleHtml, source.ownMessage, source.settings);
+		}
+
+		bar->setValue(qRound(ratio * bar->maximum()));
+		// The old document - and with it every stale resource-cache key -
+		// is gone.
+		if (old != fresh) {
+			delete old;
+		}
+	}
+
+	m_inCompaction = false;
+}
+
+void LogConsoleView::onEntriesTrimmed(int count) {
+	if (count <= 0) {
+		return;
+	}
+	if (count >= m_retainedSources.size()) {
+		m_retainedSources.clear();
+	} else {
+		m_retainedSources.remove(0, count);
+	}
 }

@@ -314,7 +314,7 @@ void LogConfig::accept() const {
 #ifndef USE_NO_TTS
 	Global::get().l->tts->setVolume(s.iTTSVolume);
 #endif
-	Global::get().mw->qteLog->document()->setMaximumBlockCount(s.iMaxLogBlocks);
+	Global::get().mw->qteLog->setLogBlockLimit(s.iMaxLogBlocks);
 }
 
 void LogConfig::on_qtwMessages_itemChanged(QTreeWidgetItem *i, int column) {
@@ -916,7 +916,56 @@ LogMessage::LogMessage(Log::MsgType mt, const QString &console, const QString &t
 	: mt(mt), console(console), terse(terse), ownMessage(ownMessage), overrideTTS(overrideTTS), ignoreTTS(ignoreTTS) {
 }
 
+// ---------------------------------------------------------------------------
+// LogDocument
+// ---------------------------------------------------------------------------
+
+namespace {
+
+/// Reads the frame-role tag LogConsoleView::appendEntry stamps onto every
+/// child frame of the root frame.
+LogDocument::FrameRole frameRoleOf(const QTextFrame *frame) {
+	return static_cast< LogDocument::FrameRole >(frame->frameFormat().intProperty(LogDocument::FrameRoleProperty));
+}
+
+/// Collects the image resource names referenced inside [from, to].
+void collectImageNamesInRange(const QTextDocument *doc, int from, int to, QSet< QUrl > &names) {
+	if (to < from)
+		return;
+	for (QTextBlock block = doc->findBlock(from); block.isValid() && block.position() <= to; block = block.next()) {
+		for (QTextBlock::iterator it = block.begin(); !it.atEnd(); ++it) {
+			const QTextFragment fragment = it.fragment();
+			if (fragment.isValid() && fragment.charFormat().isImageFormat()) {
+				const QString name = fragment.charFormat().toImageFormat().name();
+				if (!name.isEmpty()) {
+					names.insert(QUrl(name));
+				}
+			}
+		}
+	}
+}
+
+/// Approximate bytes a retained resource-cache KEY costs (the URL string
+/// in UTF-16 plus map overhead). The decoded image data dominates this by
+/// far; this is only the accounting for keys that outlive their image.
+int resourceKeyBytes(const QUrl &name) {
+	return static_cast< int >(name.toString().size()) * 2 + 32;
+}
+
+} // namespace
+
 LogDocument::LogDocument(QObject *p) : QTextDocument(p) {
+	// Display-only: no undo stack to carry around (setMaximumBlockCount used
+	// to disable undo implicitly whenever a block limit was set).
+	setUndoRedoEnabled(false);
+	// QTextDocument::clear() is not virtual, so wholesale clears coming from
+	// QTextEdit::clear() are detected through the content stream instead.
+	connect(this, &QTextDocument::contentsChange, this, &LogDocument::onContentsChange);
+}
+
+const QImage &LogDocument::placeholderImage() {
+	static const QImage placeholder(1, 1, QImage::Format_Mono);
+	return placeholder;
 }
 
 QVariant LogDocument::loadResource(int type, const QUrl &url) {
@@ -929,13 +978,257 @@ QVariant LogDocument::loadResource(int type, const QUrl &url) {
 
 	// Only accept data URLs, not external resources
 	if (url.isValid() && url.scheme() == QLatin1String("data")) {
-		return QTextDocument::loadResource(type, url);
+		// Decode the image here (instead of deferring to
+		// QTextDocument::loadResource) so that it lands in the overwritable
+		// resources map: the eviction logic must be able to swap it for the
+		// placeholder when its entry is trimmed.
+		const QImage img = decodeDataUrlImage(url);
+		if (!img.isNull()) {
+			addResource(type, url, img);
+			return img;
+		}
+		// Decode failure stays uncached.
+		return QImage();
 	}
 
-	QImage qi(1, 1, QImage::Format_Mono);
-	addResource(type, url, qi);
+	addResource(type, url, placeholderImage());
 
-	return qi;
+	return placeholderImage();
+}
+
+QImage LogDocument::decodeDataUrlImage(const QUrl &url) const {
+	// Log::imageToImg percent-encodes the base64 payload and wraps it at 72
+	// characters; QUrl parsing may additionally mangle whitespace. Rebuild
+	// the payload defensively.
+	QString encoded = url.toString(QUrl::FullyEncoded);
+	encoded.remove(QLatin1Char('\n')).remove(QLatin1Char('\r'));
+
+	// The payload follows the (possibly re-encoded) "base64," marker.
+	static const QLatin1String base64Marker("base64,");
+	qsizetype payloadStart = encoded.indexOf(base64Marker);
+	if (payloadStart < 0) {
+		static const QLatin1String base64MarkerEncoded("base64%2C");
+		payloadStart = encoded.indexOf(base64MarkerEncoded);
+		if (payloadStart < 0) {
+			return QImage();
+		}
+		payloadStart += base64MarkerEncoded.size();
+	} else {
+		payloadStart += base64Marker.size();
+	}
+
+	const QByteArray decoded =
+		QByteArray::fromBase64(QByteArray::fromPercentEncoding(encoded.mid(payloadStart).toLatin1()));
+	return QImage::fromData(decoded);
+}
+
+void LogDocument::setBlockBudget(int budget) {
+	const int previous = m_blockBudget;
+	m_blockBudget      = budget;
+
+	// Lowering (or newly enabling) the budget trims immediately.
+	if (budget > 0 && (previous <= 0 || budget < previous)) {
+		enforceBlockBudget();
+	}
+}
+
+int LogDocument::totalBlockCount() const {
+	int count = 0;
+	for (QTextBlock block = begin(); block.isValid(); block = block.next()) {
+		++count;
+	}
+	return count;
+}
+
+int LogDocument::entryCount() const {
+	int count                          = 0;
+	const QList< QTextFrame * > frames = rootFrame()->childFrames();
+	for (const QTextFrame *frame : frames) {
+		if (frameRoleOf(frame) == MessageFrameRole) {
+			++count;
+		}
+	}
+	return count;
+}
+
+void LogDocument::enforceBlockBudget() {
+	if (m_blockBudget <= 0) {
+		return;
+	}
+
+	int trimmedEntries = 0;
+
+	m_inInternalMutation = true;
+
+	// Removes one whole child frame (both delimiters included - the canonical
+	// frame removal selection), then drops residual empty leading blocks and
+	// releases images that lost their last reference.
+	const auto removeLeadingFrame = [this](QTextFrame *victim) {
+		QSet< QUrl > candidateNames;
+		collectImageNamesInRange(this, victim->firstPosition() - 1, victim->lastPosition() + 1, candidateNames);
+
+		QTextCursor remover(this);
+		remover.setPosition(victim->firstPosition() - 1);
+		remover.setPosition(victim->lastPosition() + 1, QTextCursor::KeepAnchor);
+		remover.removeSelectedText();
+
+		// Drop empty blocks left at the very front (former inter-entry
+		// separators). The block holding the first remaining frame's
+		// start-of-frame delimiter always stays.
+		while (!rootFrame()->childFrames().isEmpty()) {
+			const QTextFrame *firstFrame = rootFrame()->childFrames().constFirst();
+			const QTextBlock sofBlock    = findBlock(firstFrame->firstPosition() - 1);
+			const QTextBlock leading     = begin();
+			if (!leading.isValid() || leading == sofBlock || !leading.text().isEmpty() || leading.length() > 1) {
+				break;
+			}
+			QTextCursor eraser(this);
+			eraser.setPosition(leading.position());
+			eraser.setPosition(leading.position() + leading.length(), QTextCursor::KeepAnchor);
+			eraser.removeSelectedText();
+		}
+
+		releaseUnreferencedImageResources(candidateNames);
+	};
+
+	while (totalBlockCount() > m_blockBudget) {
+		const QList< QTextFrame * > frames = rootFrame()->childFrames();
+
+		int messageCount = 0;
+		for (const QTextFrame *frame : frames) {
+			if (frameRoleOf(frame) == MessageFrameRole) {
+				++messageCount;
+			}
+		}
+
+		// Always keep the newest entry: a single oversized entry may overshoot
+		// the budget, but the pane is never blanked and formatting is never
+		// stripped mid-entry.
+		if (messageCount <= 1) {
+			break;
+		}
+
+		// One victim per iteration, always from the front:
+		// - a leading MESSAGE frame is the oldest entry: it goes.
+		// - a leading DATE frame is kept while any of its date's messages
+		//   remain (the oldest MESSAGE right after it is the victim); it only
+		//   goes itself once another date frame directly follows (it labels
+		//   nothing anymore).
+		QTextFrame *victim   = nullptr;
+		bool removingMessage = false;
+		if (frameRoleOf(frames.at(0)) == MessageFrameRole) {
+			victim          = frames.at(0);
+			removingMessage = true;
+		} else if (frames.size() > 1 && frameRoleOf(frames.at(1)) == MessageFrameRole) {
+			victim          = frames.at(1);
+			removingMessage = true;
+		} else {
+			victim = frames.at(0);
+		}
+
+		if (!victim) {
+			break;
+		}
+
+		removeLeadingFrame(victim);
+
+		if (removingMessage) {
+			++trimmedEntries;
+		}
+	}
+
+	// Post-loop normalization: the last trimmed message may have been the
+	// last of its date, leaving an obsolete leading date frame directly
+	// before the next date frame. (Loop exit at budget satisfaction can stop
+	// right at that boundary.)
+	while (!rootFrame()->childFrames().isEmpty()) {
+		const QList< QTextFrame * > frames = rootFrame()->childFrames();
+		if (frames.size() < 2 || frameRoleOf(frames.at(0)) != DateFrameRole
+			|| frameRoleOf(frames.at(1)) != DateFrameRole) {
+			break;
+		}
+		removeLeadingFrame(frames.at(0));
+	}
+
+	m_inInternalMutation = false;
+
+	if (trimmedEntries > 0) {
+		emit entriesTrimmed(trimmedEntries);
+	}
+}
+
+void LogDocument::releaseImageResource(const QUrl &name) {
+	QSet< QUrl > candidates;
+	candidates.insert(name);
+	releaseUnreferencedImageResources(candidates);
+}
+
+void LogDocument::releaseUnreferencedImageResources(const QSet< QUrl > &candidates) {
+	if (candidates.isEmpty()) {
+		return;
+	}
+
+	// An image pasted twice keeps its bytes while any copy is retained.
+	QSet< QUrl > stillReferenced;
+	collectImageNamesInRange(this, 0, qMax(0, characterCount() - 1), stillReferenced);
+
+	for (const QUrl &name : candidates) {
+		if (stillReferenced.contains(name)) {
+			continue;
+		}
+		if (!m_releasedImageNames.contains(name)) {
+			m_releasedImageNames.insert(name);
+			m_staleResourceKeyBytes += resourceKeyBytes(name);
+		}
+		addResource(QTextDocument::ImageResource, name, placeholderImage());
+	}
+}
+
+void LogDocument::setResourceKeyBudget(int bytes) {
+	m_resourceKeyBudget = bytes;
+	if (compactionDue()) {
+		emit compactionRecommended();
+	}
+}
+
+void LogDocument::rehydrateImagesInRange(int from, int to) {
+	if (m_releasedImageNames.isEmpty()) {
+		return;
+	}
+
+	QSet< QUrl > names;
+	collectImageNamesInRange(this, from, to, names);
+
+	for (const QUrl &name : names) {
+		if (!m_releasedImageNames.contains(name)) {
+			continue;
+		}
+		// resource() would keep serving the cached placeholder without ever
+		// calling loadResource() again - the re-decode is driven from here,
+		// from the self-contained data: URL.
+		const QImage img = decodeDataUrlImage(name);
+		if (img.isNull()) {
+			continue;
+		}
+		addResource(QTextDocument::ImageResource, name, img);
+		m_releasedImageNames.remove(name);
+		m_staleResourceKeyBytes = qMax(0, m_staleResourceKeyBytes - resourceKeyBytes(name));
+	}
+}
+
+void LogDocument::onContentsChange(int, int removed, int) {
+	if (m_inInternalMutation) {
+		return;
+	}
+
+	// A wholesale clear leaves the empty one-block document: drop the
+	// eviction bookkeeping. (The resource cache itself cannot be purged
+	// without swapping the document - the owning view's clearConsole()
+	// does exactly that.)
+	if (removed > 0 && rootFrame()->childFrames().isEmpty() && characterCount() <= 1) {
+		m_releasedImageNames.clear();
+		m_staleResourceKeyBytes = 0;
+	}
 }
 
 std::set< Log::MsgType > NotificationSoundBlocker::s_blockedNotificationSounds;

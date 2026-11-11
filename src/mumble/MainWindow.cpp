@@ -1160,7 +1160,13 @@ void MainWindow::displayLogContextMenu(LogTextBrowser *source, const QPoint &mpo
 	}
 
 	menu->addSeparator();
-	menu->addAction(tr("Clear"), source, SLOT(clear(void)));
+	// Clear routes per destination: console views release their resource
+	// cache by swapping the document wholesale (LogConsoleView::clearConsole).
+	if (LogConsoleView *console = qobject_cast< LogConsoleView * >(source)) {
+		menu->addAction(tr("Clear"), console, &LogConsoleView::clearConsole);
+	} else {
+		menu->addAction(tr("Clear"), source, SLOT(clear(void)));
+	}
 	menu->exec(source->mapToGlobal(mpos));
 	delete menu;
 }

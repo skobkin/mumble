@@ -110,9 +110,13 @@ void TestLogPresentation::viewOwnsDocumentAndPolicies() {
 	QCOMPARE(LogConsoleView::isChatMessageType(Log::CriticalError), false);
 	QCOMPARE(LogConsoleView::isChatMessageType(Log::PluginMessage), false);
 
-	// Document forwarding: the block limit reaches the document.
+	// Block-limit forwarding reaches the document's whole-entry budget, and
+	// the corrupting Qt mechanism stays disengaged (canary: always 0).
 	view.setLogBlockLimit(42);
-	QCOMPARE(view.document()->maximumBlockCount(), 42);
+	const LogDocument *doc = qobject_cast< const LogDocument * >(view.document());
+	QVERIFY(doc != nullptr);
+	QCOMPARE(doc->blockBudget(), 42);
+	QCOMPARE(view.document()->maximumBlockCount(), 0);
 }
 
 void TestLogPresentation::firstEntryOfSessionHasNoDateSeparator() {

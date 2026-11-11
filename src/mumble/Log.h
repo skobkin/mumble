@@ -10,7 +10,10 @@
 
 #include <QSystemTrayIcon>
 #include <QtCore/QMutex>
+#include <QtCore/QSet>
+#include <QtCore/QUrl>
 #include <QtCore/QVector>
+#include <QtGui/QImage>
 #include <QtGui/QTextCursor>
 #include <QtGui/QTextDocument>
 
@@ -180,13 +183,114 @@ public:
 			   const QString &overrideTTS, bool ignoreTTS);
 };
 
+/// A QTextDocument specialized for log consoles: it only ever loads data:
+/// images, and it enforces a whole-entry block budget.
+///
+/// Qt's own QTextDocument::setMaximumBlockCount() trims at BLOCK granularity
+/// from the front of the document. With frame-based entries (each entry is a
+/// child QTextFrame of the root frame) that cuts frames in half and leaves
+/// orphan frame-delimiter characters behind - documented as undefined
+/// behavior, and corrupting in practice. This class therefore never uses
+/// setMaximumBlockCount and instead removes the oldest COMPLETE entries
+/// (whole child frames plus their trailing separator blocks) through one
+/// frame-contained cursor removal.
 class LogDocument : public QTextDocument {
 private:
 	Q_OBJECT
 	Q_DISABLE_COPY(LogDocument)
+
 public:
+	/// Custom QTextFrameFormat property that tags a child frame of the root
+	/// frame as a message frame or a date-separator frame (set by
+	/// LogConsoleView::appendEntry). rootFrame()->childFrames() contains both
+	/// kinds, so the budget accounting cannot treat the child-frame list as
+	/// the entry list without this tag.
+	static const int FrameRoleProperty = QTextFormat::UserProperty;
+	enum FrameRole {
+		NoFrameRole   = 0,
+		DateFrameRole = 1,
+		/// A frame carrying one console entry.
+		MessageFrameRole = 2,
+	};
+
 	LogDocument(QObject *p = nullptr);
 	QVariant loadResource(int, const QUrl &) Q_DECL_OVERRIDE;
+
+	// Whole-entry block budget ----------------------------------------------
+
+	/// Sets the maximum number of blocks the document may hold. Blocks are
+	/// counted by direct iteration (totalBlockCount()), which reliably
+	/// includes the frame delimiter pseudo-blocks. A budget <= 0 disables
+	/// trimming entirely (the default; identical to the former unlimited
+	/// growth).
+	void setBlockBudget(int budget);
+	int blockBudget() const { return m_blockBudget; }
+	/// The number of blocks, counted by manual QTextBlock iteration.
+	int totalBlockCount() const;
+	/// The number of retained message entries. Date-separator frames never
+	/// count as entries.
+	int entryCount() const;
+	/// Trims the oldest complete entries - whole message frames, their
+	/// trailing separator blocks, and date frames whose date no longer labels
+	/// any retained message - until the budget is met. The newest entry is
+	/// always kept (a single oversized entry may overshoot the budget).
+	void enforceBlockBudget();
+	/// Overwrites the resource for \p name with the shared 1x1 placeholder
+	/// and records the name's key as stale. Qt has no API to remove a
+	/// resource-cache entry, so the KEY stays until the owning view compacts
+	/// into a fresh document (compactionRecommended).
+	void releaseImageResource(const QUrl &name);
+
+	// Stale resource-key accounting -------------------------------------------
+
+	/// Sets the accumulated stale resource-key byte budget. Once
+	/// staleResourceKeyBytes() exceeds it, compactionRecommended is emitted.
+	/// A budget <= 0 disables the recommendation (the stale bytes are still
+	/// tracked). Defaults to 1 MiB.
+	void setResourceKeyBudget(int bytes);
+	int resourceKeyBudget() const { return m_resourceKeyBudget; }
+	int staleResourceKeyBytes() const { return m_staleResourceKeyBytes; }
+	/// Whether the stale resource-key bytes currently exceed the budget.
+	/// Checked by the owning view AFTER finishing an append (compacting from
+	/// inside the append would invalidate the document mid-use).
+	bool compactionDue() const { return m_resourceKeyBudget > 0 && m_staleResourceKeyBytes > m_resourceKeyBudget; }
+	/// Re-decodes data: images inside the position range [\p from, \p to]
+	/// whose resource slot currently holds the eviction placeholder. data:
+	/// URLs are self-contained, so a re-inserted reference renders at full
+	/// size again. Used by the renderer after inserting an entry.
+	void rehydrateImagesInRange(int from, int to);
+
+signals:
+	/// Emitted after enforceBlockBudget() removed \p count message entries
+	/// (date frames removed alongside do not count).
+	void entriesTrimmed(int count);
+	/// Emitted when the resource-key budget is set below already-accumulated
+	/// stale bytes. During eviction the view polls compactionDue() itself
+	/// after finishing the append (compacting from inside the append would
+	/// invalidate the document mid-use); it should compact into a fresh
+	/// document in response.
+	void compactionRecommended();
+
+private slots:
+	void onContentsChange(int from, int removed, int added);
+
+private:
+	static const QImage &placeholderImage();
+	/// Decodes a data: image URL produced by Log::imageToImg (percent-encoded
+	/// base64 payload, possibly wrapped). Returns a null image on failure.
+	QImage decodeDataUrlImage(const QUrl &url) const;
+	/// Overwrites the resources of all candidate names that no longer have a
+	/// reference anywhere in the document (an image pasted twice keeps its
+	/// bytes while any copy is retained).
+	void releaseUnreferencedImageResources(const QSet< QUrl > &candidates);
+
+	int m_blockBudget           = 0;
+	int m_resourceKeyBudget     = 1024 * 1024;
+	int m_staleResourceKeyBytes = 0;
+	/// Names whose resource slot was replaced by the placeholder.
+	QSet< QUrl > m_releasedImageNames;
+	/// Guards re-entrancy while our own trimming mutates the document.
+	bool m_inInternalMutation = false;
 };
 
 class NotificationSoundBlocker {
