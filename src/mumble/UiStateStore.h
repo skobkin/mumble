@@ -10,7 +10,7 @@
 #include <QList>
 #include <QString>
 
-/// Layout values persisted in the new-UI sidecar file (layoutRevision 1).
+/// Layout values persisted in the new-UI sidecar file (layoutRevision 2).
 ///
 /// The layout fields are owned by the caller: the shell integration reads them
 /// after UiStateStore::load() and fills them from live widgets before
@@ -19,9 +19,13 @@
 /// UiStateStore always stamps the currently supported schema version, layout
 /// revision and Qt version.
 struct UiState {
-	bool minimal         = false;
-	bool hideFrame       = false;
-	bool activityVisible = true;
+	bool minimal   = false;
+	bool hideFrame = false;
+	/// Whether the Activity tab was the active console tab at the last
+	/// normal-mode save (layoutRevision 2). Default false = Chat. Not
+	/// overwritten while minimal. Replaces revision 1's retired
+	/// "activityVisible" (never consumed by any shipped UI).
+	bool activeTabIsActivity = false;
 
 	/// Opaque QWidget::saveGeometry() bytes. Empty means "not saved".
 	QByteArray normalGeometry;
@@ -31,7 +35,7 @@ struct UiState {
 	QList< int > normalSplitterSizes;
 
 	// --- Metadata as loaded from the sidecar; ignored on save ---
-	int layoutRevision  = 1;
+	int layoutRevision = 1;
 	QString qtVersion;
 	bool restoreBlocked = false;
 };
@@ -64,8 +68,11 @@ public:
 	/// JSON schema version of the sidecar format ("version" field).
 	static constexpr int SchemaVersion = 1;
 	/// Version of the layout field set the running shell understands
-	/// ("layoutRevision" field).
-	static constexpr int LayoutRevision = 1;
+	/// ("layoutRevision" field). Older revisions are accepted and migrated on
+	/// load (fields they lack are default-filled); the current revision is
+	/// stamped again on the next save. Revision 1 carried "activityVisible"
+	/// (retired - it never labeled a shipped control).
+	static constexpr int LayoutRevision = 2;
 
 	/// Leading big-endian quint32 of QWidget::saveGeometry() output
 	/// (0x1D9D0CB). Used to reject blobs that are not Qt geometry data before

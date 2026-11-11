@@ -156,7 +156,9 @@ bool Themes::apply() {
 	}
 
 	if (Global::get().mw) {
-		Global::get().mw->qteLog->document()->setDefaultStyleSheet(qApp->styleSheet());
+		// Forwarded through the window so every console document is restyled
+		// (the window is the sink; Themes holds no widgets).
+		Global::get().mw->setConsoleStyleSheet(qApp->styleSheet());
 	}
 	return result;
 }

@@ -72,8 +72,7 @@ QString geometryError(const QByteArray &geometry) {
 	if (geometry.isEmpty()) {
 		return QString();
 	}
-	if (geometry.size() < UiStateStore::MinGeometryBytes
-		|| geometry.size() > UiStateStore::MaxGeometryBytes) {
+	if (geometry.size() < UiStateStore::MinGeometryBytes || geometry.size() > UiStateStore::MaxGeometryBytes) {
 		return QStringLiteral("decoded size %1 outside [%2, %3]")
 			.arg(geometry.size())
 			.arg(UiStateStore::MinGeometryBytes)
@@ -107,8 +106,7 @@ ExistingVerdict readExisting(const QString &path, ParsedSidecar *out, QString *e
 
 	QFile file(path);
 	if (!file.open(QIODevice::ReadOnly)) {
-		assignError(errorString, QStringLiteral("could not open '%1' for reading: %2")
-									 .arg(path, file.errorString()));
+		assignError(errorString, QStringLiteral("could not open '%1' for reading: %2").arg(path, file.errorString()));
 		return ExistingVerdict::IoError;
 	}
 	const QByteArray raw = file.readAll();
@@ -117,8 +115,7 @@ ExistingVerdict readExisting(const QString &path, ParsedSidecar *out, QString *e
 	QJsonParseError parseError;
 	const QJsonDocument document = QJsonDocument::fromJson(raw, &parseError);
 	if (parseError.error != QJsonParseError::NoError || !document.isObject()) {
-		assignError(errorString,
-					QStringLiteral("invalid JSON in '%1': %2").arg(path, parseError.errorString()));
+		assignError(errorString, QStringLiteral("invalid JSON in '%1': %2").arg(path, parseError.errorString()));
 		return ExistingVerdict::InvalidContent;
 	}
 	const QJsonObject root = document.object();
@@ -130,11 +127,10 @@ ExistingVerdict readExisting(const QString &path, ParsedSidecar *out, QString *e
 		return ExistingVerdict::InvalidContent;
 	}
 	if (version > UiStateStore::SchemaVersion) {
-		assignError(errorString,
-					QStringLiteral("sidecar '%1' uses schema version %2 > %3")
-						.arg(path)
-						.arg(version)
-						.arg(UiStateStore::SchemaVersion));
+		assignError(errorString, QStringLiteral("sidecar '%1' uses schema version %2 > %3")
+									 .arg(path)
+									 .arg(version)
+									 .arg(UiStateStore::SchemaVersion));
 		return ExistingVerdict::NewerVersion;
 	}
 	// Both formats start at 1; anything below is corruption, not an older
@@ -147,24 +143,24 @@ ExistingVerdict readExisting(const QString &path, ParsedSidecar *out, QString *e
 
 	int layoutRevision = 0;
 	if (!jsonInt(root.value(QStringLiteral("layoutRevision")), &layoutRevision)) {
-		assignError(errorString,
-					QStringLiteral("missing/invalid 'layoutRevision' in '%1'").arg(path));
+		assignError(errorString, QStringLiteral("missing/invalid 'layoutRevision' in '%1'").arg(path));
 		return ExistingVerdict::InvalidContent;
 	}
 	if (layoutRevision > UiStateStore::LayoutRevision) {
-		assignError(errorString,
-					QStringLiteral("sidecar '%1' uses layout revision %2 > %3")
-						.arg(path)
-						.arg(layoutRevision)
-						.arg(UiStateStore::LayoutRevision));
+		assignError(errorString, QStringLiteral("sidecar '%1' uses layout revision %2 > %3")
+									 .arg(path)
+									 .arg(layoutRevision)
+									 .arg(UiStateStore::LayoutRevision));
 		return ExistingVerdict::NewerVersion;
 	}
 	if (layoutRevision < 1) {
-		assignError(errorString,
-					QStringLiteral("invalid 'layoutRevision' %1 in '%2'").arg(layoutRevision).arg(path));
+		assignError(errorString, QStringLiteral("invalid 'layoutRevision' %1 in '%2'").arg(layoutRevision).arg(path));
 		return ExistingVerdict::InvalidContent;
 	}
-	Q_ASSERT(layoutRevision == UiStateStore::LayoutRevision);
+	// Older layout revisions are MIGRATED, never rejected: the body below
+	// default-fills every field the running revision expects but the file
+	// lacks, and the current revision is stamped again on the next save.
+	Q_ASSERT(layoutRevision >= 1 && layoutRevision <= UiStateStore::LayoutRevision);
 
 	// Body validation.
 	const QJsonValue qtVersionValue = root.value(QStringLiteral("qtVersion"));
@@ -179,8 +175,7 @@ ExistingVerdict readExisting(const QString &path, ParsedSidecar *out, QString *e
 	const auto readBool = [&root, &path, &errorString](const QString &key, bool *out) -> bool {
 		const QJsonValue value = root.value(key);
 		if (!value.isBool()) {
-			assignError(errorString,
-						QStringLiteral("missing/invalid '%1' in '%2'").arg(key, path));
+			assignError(errorString, QStringLiteral("missing/invalid '%1' in '%2'").arg(key, path));
 			return false;
 		}
 		*out = value.toBool();
@@ -188,21 +183,35 @@ ExistingVerdict readExisting(const QString &path, ParsedSidecar *out, QString *e
 	};
 	if (!readBool(QStringLiteral("restoreBlocked"), &out->restoreBlocked)
 		|| !readBool(QStringLiteral("minimal"), &out->values.minimal)
-		|| !readBool(QStringLiteral("hideFrame"), &out->values.hideFrame)
-		|| !readBool(QStringLiteral("activityVisible"), &out->values.activityVisible)) {
+		|| !readBool(QStringLiteral("hideFrame"), &out->values.hideFrame)) {
 		return ExistingVerdict::InvalidContent;
 	}
 
+	// layoutRevision migration: revision 1 carried "activityVisible", retired
+	// in revision 2 without ever having labeled a shipped control - it is
+	// accepted and ignored (unknown keys are). Revision 2's
+	// "activeTabIsActivity" is default-filled (missing = Chat, the pre-split
+	// default); a present-but-bad-typed value is still corruption.
+	out->values.activeTabIsActivity = false;
+	if (layoutRevision >= 2) {
+		const QJsonValue tab = root.value(QStringLiteral("activeTabIsActivity"));
+		if (!tab.isUndefined()) {
+			if (!tab.isBool()) {
+				assignError(errorString, QStringLiteral("missing/invalid 'activeTabIsActivity' in '%1'").arg(path));
+				return ExistingVerdict::InvalidContent;
+			}
+			out->values.activeTabIsActivity = tab.toBool();
+		}
+	}
+
 	const auto readGeometry = [&path, &errorString](const QJsonObject &mode, const QString &modeName,
-													const QString &key,
-													QByteArray *out) -> bool {
+													const QString &key, QByteArray *out) -> bool {
 		if (!mode.contains(key)) {
 			return true; // optional; absent means "not saved"
 		}
 		const QJsonValue value = mode.value(key);
 		if (!value.isString()) {
-			assignError(errorString,
-						QStringLiteral("invalid '%1.%2' in '%3'").arg(modeName, key, path));
+			assignError(errorString, QStringLiteral("invalid '%1.%2' in '%3'").arg(modeName, key, path));
 			return false;
 		}
 		const QString text = value.toString();
@@ -212,14 +221,12 @@ ExistingVerdict readExisting(const QString &path, ParsedSidecar *out, QString *e
 		const QByteArray::FromBase64Result decoded =
 			QByteArray::fromBase64Encoding(text.toLatin1(), QByteArray::AbortOnBase64DecodingErrors);
 		if (decoded.decodingStatus != QByteArray::Base64DecodingStatus::Ok) {
-			assignError(errorString,
-						QStringLiteral("'%1.%2' in '%3' is not valid base64").arg(modeName, key, path));
+			assignError(errorString, QStringLiteral("'%1.%2' in '%3' is not valid base64").arg(modeName, key, path));
 			return false;
 		}
 		const QString error = geometryError(*decoded);
 		if (!error.isEmpty()) {
-			assignError(errorString,
-						QStringLiteral("'%1.%2' in '%3': %4").arg(modeName, key, path, error));
+			assignError(errorString, QStringLiteral("'%1.%2' in '%3': %4").arg(modeName, key, path, error));
 			return false;
 		}
 		*out = *decoded;
@@ -236,23 +243,19 @@ ExistingVerdict readExisting(const QString &path, ParsedSidecar *out, QString *e
 		return ExistingVerdict::InvalidContent;
 	} else {
 		const QJsonObject normal = normalValue.toObject();
-		if (!readGeometry(normal, QStringLiteral("normal"), QStringLiteral("geometry"),
-						  &out->values.normalGeometry)) {
+		if (!readGeometry(normal, QStringLiteral("normal"), QStringLiteral("geometry"), &out->values.normalGeometry)) {
 			return ExistingVerdict::InvalidContent;
 		}
 		if (normal.contains(QStringLiteral("splitterSizes"))) {
 			const QJsonValue sizesValue = normal.value(QStringLiteral("splitterSizes"));
 			if (!sizesValue.isArray()) {
-				assignError(errorString,
-							QStringLiteral("invalid 'normal.splitterSizes' in '%1'").arg(path));
+				assignError(errorString, QStringLiteral("invalid 'normal.splitterSizes' in '%1'").arg(path));
 				return ExistingVerdict::InvalidContent;
 			}
 			const QJsonArray sizes = sizesValue.toArray();
-			const qsizetype count = sizes.size();
-			if (count != 0
-				&& (count < UiStateStore::MinSplitterCount || count > UiStateStore::MaxSplitterCount)) {
-				assignError(errorString,
-							QStringLiteral("implausible splitter count %1 in '%2'").arg(count).arg(path));
+			const qsizetype count  = sizes.size();
+			if (count != 0 && (count < UiStateStore::MinSplitterCount || count > UiStateStore::MaxSplitterCount)) {
+				assignError(errorString, QStringLiteral("implausible splitter count %1 in '%2'").arg(count).arg(path));
 				return ExistingVerdict::InvalidContent;
 			}
 			QList< int > parsedSizes;
@@ -261,8 +264,7 @@ ExistingVerdict readExisting(const QString &path, ParsedSidecar *out, QString *e
 				// Zero is valid (a collapsed pane); negative and oversized
 				// values are corruption.
 				if (!jsonInt(element, &size) || size < 0 || size > UiStateStore::MaxSplitterSize) {
-					assignError(errorString,
-								QStringLiteral("invalid splitter size in '%1'").arg(path));
+					assignError(errorString, QStringLiteral("invalid splitter size in '%1'").arg(path));
 					return ExistingVerdict::InvalidContent;
 				}
 				parsedSizes.append(size);
@@ -278,7 +280,7 @@ ExistingVerdict readExisting(const QString &path, ParsedSidecar *out, QString *e
 		assignError(errorString, QStringLiteral("invalid 'compact' object in '%1'").arg(path));
 		return ExistingVerdict::InvalidContent;
 	} else if (!readGeometry(compactValue.toObject(), QStringLiteral("compact"), QStringLiteral("geometry"),
-							&out->values.compactGeometry)) {
+							 &out->values.compactGeometry)) {
 		return ExistingVerdict::InvalidContent;
 	}
 
@@ -288,8 +290,7 @@ ExistingVerdict readExisting(const QString &path, ParsedSidecar *out, QString *e
 QJsonDocument buildDocument(const UiState &values, bool restoreBlocked, bool includeGeometry) {
 	QJsonObject normal;
 	if (includeGeometry && !values.normalGeometry.isEmpty()) {
-		normal.insert(QStringLiteral("geometry"),
-					  QString::fromLatin1(values.normalGeometry.toBase64()));
+		normal.insert(QStringLiteral("geometry"), QString::fromLatin1(values.normalGeometry.toBase64()));
 	}
 	if (!values.normalSplitterSizes.isEmpty()) {
 		QJsonArray sizes;
@@ -301,8 +302,7 @@ QJsonDocument buildDocument(const UiState &values, bool restoreBlocked, bool inc
 
 	QJsonObject compact;
 	if (includeGeometry && !values.compactGeometry.isEmpty()) {
-		compact.insert(QStringLiteral("geometry"),
-					   QString::fromLatin1(values.compactGeometry.toBase64()));
+		compact.insert(QStringLiteral("geometry"), QString::fromLatin1(values.compactGeometry.toBase64()));
 	}
 
 	QJsonObject root;
@@ -312,7 +312,7 @@ QJsonDocument buildDocument(const UiState &values, bool restoreBlocked, bool inc
 	root.insert(QStringLiteral("restoreBlocked"), restoreBlocked);
 	root.insert(QStringLiteral("minimal"), values.minimal);
 	root.insert(QStringLiteral("hideFrame"), values.hideFrame);
-	root.insert(QStringLiteral("activityVisible"), values.activityVisible);
+	root.insert(QStringLiteral("activeTabIsActivity"), values.activeTabIsActivity);
 	root.insert(QStringLiteral("normal"), normal);
 	root.insert(QStringLiteral("compact"), compact);
 	return QJsonDocument(root);
@@ -320,8 +320,7 @@ QJsonDocument buildDocument(const UiState &values, bool restoreBlocked, bool inc
 
 } // namespace
 
-UiStateStore::UiStateStore(QString primarySettingsPath)
-	: m_sidecarPath(sidecarPathFor(primarySettingsPath)) {
+UiStateStore::UiStateStore(QString primarySettingsPath) : m_sidecarPath(sidecarPathFor(primarySettingsPath)) {
 }
 
 QString UiStateStore::sidecarPathFor(const QString &primarySettingsPath) {
@@ -404,7 +403,7 @@ UiStateStore::LoadResult UiStateStore::load(QString *errorString) {
 			break;
 	}
 
-	UiState values = parsed.values;
+	UiState values        = parsed.values;
 	values.layoutRevision = parsed.layoutRevision;
 	values.qtVersion      = parsed.qtVersion;
 
@@ -412,7 +411,7 @@ UiStateStore::LoadResult UiStateStore::load(QString *errorString) {
 	// interrupted. It takes precedence: geometry must not be restored until
 	// the user explicitly resets the layout.
 	if (parsed.restoreBlocked) {
-		values.restoreBlocked   = true;
+		values.restoreBlocked = true;
 		values.normalGeometry.clear();
 		values.compactGeometry.clear();
 		m_loadedState    = values;
@@ -462,8 +461,7 @@ QString UiStateStore::validateValues(const UiState &state) {
 	return QString();
 }
 
-UiStateStore::SaveResult UiStateStore::save(const UiState &state, QString *errorString,
-											bool clearRestoreBlock) {
+UiStateStore::SaveResult UiStateStore::save(const UiState &state, QString *errorString, bool clearRestoreBlock) {
 	if (clearRestoreBlock) {
 		// Explicit "reset fork layout": release the latch and clear any
 		// potentially unsafe geometry in the same write. A successful reset
@@ -486,9 +484,9 @@ UiStateStore::SaveResult UiStateStore::save(const UiState &state, QString *error
 
 bool UiStateStore::beginGeometryRestore(const UiState &candidate, QString *errorString) {
 	if (m_restoreBlocked || m_restoreInProgress) {
-		const QString message = QStringLiteral(
-			"restoration is blocked; an explicit layout reset (save with clearRestoreBlock) is "
-			"required before restoring geometry again");
+		const QString message =
+			QStringLiteral("restoration is blocked; an explicit layout reset (save with clearRestoreBlock) is "
+						   "required before restoring geometry again");
 		assignError(errorString, message);
 		qWarning("UiStateStore: %s", qUtf8Printable(message));
 		return false;
@@ -501,12 +499,11 @@ bool UiStateStore::beginGeometryRestore(const UiState &candidate, QString *error
 	{
 		ParsedSidecar existing;
 		QString readError;
-		if (readExisting(m_sidecarPath, &existing, &readError) == ExistingVerdict::Ok
-			&& existing.restoreBlocked) {
+		if (readExisting(m_sidecarPath, &existing, &readError) == ExistingVerdict::Ok && existing.restoreBlocked) {
 			m_restoreBlocked = true;
-			const QString message = QStringLiteral(
-				"the existing sidecar carries the restore latch; an explicit layout reset (save "
-				"with clearRestoreBlock) is required before restoring geometry again");
+			const QString message =
+				QStringLiteral("the existing sidecar carries the restore latch; an explicit layout reset (save "
+							   "with clearRestoreBlock) is required before restoring geometry again");
 			assignError(errorString, message);
 			qWarning("UiStateStore: %s", qUtf8Printable(message));
 			return false;
@@ -520,11 +517,9 @@ bool UiStateStore::beginGeometryRestore(const UiState &candidate, QString *error
 	return true;
 }
 
-UiStateStore::SaveResult UiStateStore::finishGeometryRestore(const UiState &restored,
-															 QString *errorString) {
+UiStateStore::SaveResult UiStateStore::finishGeometryRestore(const UiState &restored, QString *errorString) {
 	if (!m_restoreInProgress) {
-		const QString message =
-			QStringLiteral("finishGeometryRestore without a successful beginGeometryRestore");
+		const QString message = QStringLiteral("finishGeometryRestore without a successful beginGeometryRestore");
 		assignError(errorString, message);
 		qWarning("UiStateStore: %s", qUtf8Printable(message));
 		return SaveResult::InvalidOperation;
@@ -537,11 +532,9 @@ UiStateStore::SaveResult UiStateStore::finishGeometryRestore(const UiState &rest
 	return result;
 }
 
-UiStateStore::SaveResult UiStateStore::abortGeometryRestore(const UiState &current,
-															QString *errorString) {
+UiStateStore::SaveResult UiStateStore::abortGeometryRestore(const UiState &current, QString *errorString) {
 	if (!m_restoreInProgress) {
-		const QString message =
-			QStringLiteral("abortGeometryRestore without a successful beginGeometryRestore");
+		const QString message = QStringLiteral("abortGeometryRestore without a successful beginGeometryRestore");
 		assignError(errorString, message);
 		qWarning("UiStateStore: %s", qUtf8Printable(message));
 		return SaveResult::InvalidOperation;
@@ -578,8 +571,7 @@ bool UiStateStore::quarantineExisting(QString *errorString) {
 			assignError(errorString, QStringLiteral("existing sidecar is valid; nothing to quarantine"));
 			return false;
 		case ExistingVerdict::NewerVersion:
-			assignError(errorString,
-						QStringLiteral("refusing to quarantine a newer-version sidecar"));
+			assignError(errorString, QStringLiteral("refusing to quarantine a newer-version sidecar"));
 			return false;
 		case ExistingVerdict::IoError:
 			assignError(errorString, QStringLiteral("sidecar is unreadable: %1").arg(readError));
@@ -655,16 +647,14 @@ UiStateStore::SaveResult UiStateStore::writeValidated(const UiState &values, boo
 			qWarning("UiStateStore: %s", qUtf8Printable(existingError));
 			return SaveResult::RefusedNewerVersion;
 		case ExistingVerdict::InvalidContent:
-			assignError(errorString,
-						QStringLiteral("existing sidecar is invalid and preserved for diagnosis: %1")
-							.arg(existingError));
-			qWarning("UiStateStore: refusing to overwrite invalid sidecar '%s'",
-					 qUtf8Printable(m_sidecarPath));
+			assignError(
+				errorString,
+				QStringLiteral("existing sidecar is invalid and preserved for diagnosis: %1").arg(existingError));
+			qWarning("UiStateStore: refusing to overwrite invalid sidecar '%s'", qUtf8Printable(m_sidecarPath));
 			return SaveResult::RefusedInvalidExisting;
 		case ExistingVerdict::IoError:
 			assignError(errorString,
-						QStringLiteral("existing sidecar is unreadable, refusing to overwrite: %1")
-							.arg(existingError));
+						QStringLiteral("existing sidecar is unreadable, refusing to overwrite: %1").arg(existingError));
 			qWarning("UiStateStore: %s", qUtf8Printable(existingError));
 			return SaveResult::RefusedInvalidExisting;
 	}
@@ -675,8 +665,8 @@ UiStateStore::SaveResult UiStateStore::writeValidated(const UiState &values, boo
 	// completed guarded restoration (mayReleaseLatchedExisting). Any other
 	// write that would persist geometry with a cleared latch is demoted to
 	// keep the latch and strip the geometry.
-	if (verdict == ExistingVerdict::Ok && existing.restoreBlocked && !writeRestoreBlocked
-		&& includeGeometry && !mayReleaseLatchedExisting) {
+	if (verdict == ExistingVerdict::Ok && existing.restoreBlocked && !writeRestoreBlocked && includeGeometry
+		&& !mayReleaseLatchedExisting) {
 		writeRestoreBlocked = true;
 		includeGeometry     = false;
 		m_restoreBlocked    = true;
@@ -687,26 +677,24 @@ UiStateStore::SaveResult UiStateStore::writeValidated(const UiState &values, boo
 
 	QSaveFile file(m_sidecarPath);
 	if (!file.open(QIODevice::WriteOnly)) {
-		const QString message = QStringLiteral("could not open '%1' for writing: %2")
-									.arg(m_sidecarPath, file.errorString());
+		const QString message =
+			QStringLiteral("could not open '%1' for writing: %2").arg(m_sidecarPath, file.errorString());
 		assignError(errorString, message);
 		qWarning("UiStateStore: %s", qUtf8Printable(message));
 		return SaveResult::WriteError;
 	}
-	QByteArray payload = buildDocument(values, writeRestoreBlocked, includeGeometry)
-							 .toJson(QJsonDocument::Indented);
+	QByteArray payload = buildDocument(values, writeRestoreBlocked, includeGeometry).toJson(QJsonDocument::Indented);
 	payload.append('\n');
 	if (file.write(payload) != payload.size()) {
-		const QString message = QStringLiteral("short write to '%1': %2")
-									.arg(m_sidecarPath, file.errorString());
+		const QString message = QStringLiteral("short write to '%1': %2").arg(m_sidecarPath, file.errorString());
 		assignError(errorString, message);
 		qWarning("UiStateStore: %s", qUtf8Printable(message));
 		file.cancelWriting();
 		return SaveResult::WriteError;
 	}
 	if (!file.commit()) {
-		const QString message = QStringLiteral("atomic commit of '%1' failed: %2")
-									.arg(m_sidecarPath, file.errorString());
+		const QString message =
+			QStringLiteral("atomic commit of '%1' failed: %2").arg(m_sidecarPath, file.errorString());
 		assignError(errorString, message);
 		qWarning("UiStateStore: %s", qUtf8Printable(message));
 		return SaveResult::WriteError;

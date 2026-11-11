@@ -12,37 +12,36 @@
 class ChatPanel;
 class ChatbarTextEdit;
 class QLabel;
-class LogTextBrowser;
+class LogConsoleView;
 class QSplitter;
 class UserView;
 
 /// Central-widget presentation for the redesigned main window: a header
-/// container (filled by ConnectionHeader in a later stage) above a horizontal
-/// splitter with the channel/user tree on the left and the chat panel (combined
-/// log + chat input) on the right, plus the minimal-view note.
+/// container (filled by ConnectionHeader) above a horizontal splitter with the
+/// channel/user tree on the left and the chat panel (chat/activity switch row,
+/// stacked console views, chat input) on the right, plus the minimal-view
+/// note.
 ///
 /// The shell owns layout containers only. It adopts the existing widgets
-/// (UserView, LogTextBrowser, ChatbarTextEdit) created by the generated
-/// MainWindow UI, so all signal connections, handlers and external member
-/// access keep working with the very same objects. It has no Global dependency
-/// and creates no models or connections, which keeps it constructible in
-/// isolated tests.
-///
-/// The chat-target label and the chat/activity split are Stage 5 work; this
-/// shell deliberately keeps the single combined log presentation.
+/// (UserView, the two LogConsoleView destinations, ChatbarTextEdit) created by
+/// MainWindow, so all signal connections, handlers and external member access
+/// keep working with the very same objects. It has no Global dependency and
+/// creates no models or connections, which keeps it constructible in isolated
+/// tests.
 class MainWindowShell : public QWidget {
 	Q_OBJECT
 
 public:
 	/// Adopts \p tree (reparented from the legacy central-widget role),
-	/// \p log and \p chatInput (reparented from their legacy dock containers)
-	/// into the shell layout.
-	MainWindowShell(UserView *tree, LogTextBrowser *log, ChatbarTextEdit *chatInput,
-					QWidget *parent = nullptr);
+	/// \p chatConsole, \p activityConsole and \p chatInput (created by, or
+	/// reparented from, MainWindow) into the shell layout.
+	MainWindowShell(UserView *tree, LogConsoleView *chatConsole, LogConsoleView *activityConsole,
+					ChatbarTextEdit *chatInput, QWidget *parent = nullptr);
 
 	/// The adopted channel/user tree. Same object the generated UI created.
 	UserView *tree() const;
-	/// The adopted chat panel wrapping the combined log and the chat input.
+	/// The adopted chat panel wrapping the console switch row, the stacked
+	/// console views and the chat input.
 	ChatPanel *chatPanel() const;
 
 	/// Places \p header into the reserved header container. Passing nullptr
@@ -67,25 +66,21 @@ public:
 	void setMinimal(bool minimal);
 	bool isMinimal() const;
 
-	/// Whether the combined console is currently visible to the user. Reflects
-	/// the actual log widget's visibility (and the shell's own), never a stored
-	/// flag, so hiding any ancestor or the widget itself is reported correctly.
-	bool isConsoleVisible() const;
-
 	/// The minimal-view note is shown only when wanted AND in minimal mode
 	/// (mirrors the legacy qdwMinimalViewNote visibility rule).
 	void setNoteVisible(bool visible);
 	void setNoteText(const QString &text);
 
 	/// Moves keyboard focus to the next main interaction area, cycling
-	/// combined log → chat input → user tree (the order the main window's
-	/// F6 has always used). Areas that cannot take focus in the current
-	/// presentation are skipped (the chat panel with log and chat input is
-	/// hidden in minimal mode; disabled areas are skipped too), and focus
-	/// held by any other widget (e.g. a button inside the persistent voice
-	/// bar) starts the cycle from the beginning instead of being treated as
-	/// an error. Returns the area that received focus, or nullptr when no
-	/// area is eligible.
+	/// ACTIVE console view → chat input → user tree (the order the main
+	/// window's F6 has always used; only one console is visible at a time).
+	/// Areas that cannot take focus in the current presentation are skipped
+	/// (the chat panel with both consoles and the chat input is hidden in
+	/// minimal mode; disabled areas are skipped too), and focus held by any
+	/// other widget (e.g. a button inside the persistent voice bar) starts
+	/// the cycle from the beginning instead of being treated as an error.
+	/// Returns the area that received focus, or nullptr when no area is
+	/// eligible.
 	QWidget *focusNextMainArea();
 
 private:
@@ -102,8 +97,8 @@ private:
 	/// panel is hidden in minimal mode (hidden splitter children would
 	/// otherwise keep the window's minimum width at the normal-mode value).
 	static constexpr int m_chatPanelMinimumWidth = 280;
-	bool m_minimal     = false;
-	bool m_noteVisible = false;
+	bool m_minimal                               = false;
+	bool m_noteVisible                           = false;
 };
 
 #endif // MUMBLE_WIDGETS_MAINWINDOWSHELL_H_

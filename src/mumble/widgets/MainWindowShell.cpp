@@ -5,18 +5,18 @@
 
 #include "widgets/MainWindowShell.h"
 
-#include "CustomElements.h"
 #include "UserView.h"
 #include "widgets/ChatPanel.h"
+#include "widgets/LogConsoleView.h"
 
 #include <QLabel>
 #include <QSplitter>
 #include <QVBoxLayout>
 
-MainWindowShell::MainWindowShell(UserView *tree, LogTextBrowser *log, ChatbarTextEdit *chatInput,
-								 QWidget *parent)
-	: QWidget(parent), m_headerContainer(new QWidget(this)), m_splitter(new QSplitter(this)),
-	  m_note(new QLabel(this)), m_tree(tree), m_chatPanel(new ChatPanel(log, chatInput)) {
+MainWindowShell::MainWindowShell(UserView *tree, LogConsoleView *chatConsole, LogConsoleView *activityConsole,
+								 ChatbarTextEdit *chatInput, QWidget *parent)
+	: QWidget(parent), m_headerContainer(new QWidget(this)), m_splitter(new QSplitter(this)), m_note(new QLabel(this)),
+	  m_tree(tree), m_chatPanel(new ChatPanel(chatConsole, activityConsole, chatInput)) {
 	m_tree->setMinimumWidth(180);
 	m_chatPanel->setMinimumWidth(m_chatPanelMinimumWidth);
 	m_chatPanel->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
@@ -44,9 +44,9 @@ MainWindowShell::MainWindowShell(UserView *tree, LogTextBrowser *log, ChatbarTex
 	layout->addWidget(m_splitter, 1);
 	layout->addWidget(m_note, 0);
 
-	// Explicit keyboard navigation chain across the adopted widgets.
-	QWidget::setTabOrder(m_tree, m_chatPanel->log());
-	QWidget::setTabOrder(m_chatPanel->log(), m_chatPanel->chatInput());
+	// Explicit keyboard navigation chain across the adopted widgets (the
+	// panel extends it internally: switch row -> console views -> composer).
+	m_chatPanel->establishTabOrderAfter(m_tree);
 }
 
 UserView *MainWindowShell::tree() const {
@@ -151,10 +151,6 @@ bool MainWindowShell::isMinimal() const {
 	return m_minimal;
 }
 
-bool MainWindowShell::isConsoleVisible() const {
-	return !m_minimal && isVisible() && m_chatPanel->log()->isVisible();
-}
-
 void MainWindowShell::setNoteVisible(bool visible) {
 	m_noteVisible = visible;
 	m_note->setVisible(visible && m_minimal);
@@ -165,8 +161,10 @@ void MainWindowShell::setNoteText(const QString &text) {
 }
 
 QWidget *MainWindowShell::focusNextMainArea() {
+	// Only the active console view is visible (the stacked pair hides the
+	// inactive one), so the cycle covers exactly what the user can see.
 	QWidget *mainAreas[] = {
-		m_chatPanel->log(),
+		m_chatPanel->activeConsole(),
 		m_chatPanel->chatInput(),
 		m_tree,
 	};

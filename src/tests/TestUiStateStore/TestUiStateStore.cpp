@@ -62,19 +62,19 @@ QByteArray validGeometryBytes(int fillerSize = 64) {
 
 UiState sampleState() {
 	UiState state;
-	state.minimal              = true;
-	state.hideFrame            = false;
-	state.activityVisible      = false;
-	state.normalGeometry       = validGeometryBytes();
-	state.compactGeometry      = validGeometryBytes(48);
-	state.normalSplitterSizes  = QList< int >{ 240, 720 };
+	state.minimal             = true;
+	state.hideFrame           = false;
+	state.activeTabIsActivity = true;
+	state.normalGeometry      = validGeometryBytes();
+	state.compactGeometry     = validGeometryBytes(48);
+	state.normalSplitterSizes = QList< int >{ 240, 720 };
 	return state;
 }
 
-/// Builds a valid revision-1 sidecar document, then applies key overrides
+/// Builds a valid revision-1 sidecar document (the retired "activityVisible"
+/// era - exactly what a revision-1 client wrote), then applies key overrides
 /// (added/replaced) and removals so individual fields can be corrupted.
-QByteArray makeSidecar(const QJsonObject &overrides = QJsonObject(),
-					   const QStringList &removeKeys = QStringList()) {
+QByteArray makeSidecar(const QJsonObject &overrides = QJsonObject(), const QStringList &removeKeys = QStringList()) {
 	QJsonObject normal;
 	normal.insert(QStringLiteral("splitterSizes"), QJsonArray{ 240, 720 });
 	QJsonObject root;
@@ -110,6 +110,11 @@ private slots:
 	void twoProfilesSameDirectory();
 	void schemaVersionHandling();
 	void newerVersionPreserved();
+	/// layoutRevision 1 -> 2: a genuine revision-1 body (with the retired
+	/// "activityVisible": true) loads as migrated Chat-active state, and the
+	/// next save stamps revision 2 without quarantine. A revision-2 body
+	/// without "activeTabIsActivity" default-fills to Chat.
+	void layoutRevisionMigration();
 	void invalidJsonAndTypes();
 	void geometryValidation();
 	void splitterZeroPaneRoundTrip();
@@ -135,7 +140,7 @@ void TestUiStateStore::missingSidecarDefaults() {
 	const UiState &loaded = store.loadedState();
 	QCOMPARE(loaded.minimal, false);
 	QCOMPARE(loaded.hideFrame, false);
-	QCOMPARE(loaded.activityVisible, true);
+	QCOMPARE(loaded.activeTabIsActivity, false);
 	QVERIFY(loaded.normalGeometry.isEmpty());
 	QVERIFY(loaded.compactGeometry.isEmpty());
 	QVERIFY(loaded.normalSplitterSizes.isEmpty());
@@ -163,9 +168,12 @@ void TestUiStateStore::saveLoadRoundTrip() {
 	QVERIFY(raw.contains('\n'));
 	const QJsonObject root = QJsonDocument::fromJson(raw).object();
 	QCOMPARE(root.value(QStringLiteral("version")).toInt(), 1);
-	QCOMPARE(root.value(QStringLiteral("layoutRevision")).toInt(), 1);
+	QCOMPARE(root.value(QStringLiteral("layoutRevision")).toInt(), UiStateStore::LayoutRevision);
 	QCOMPARE(root.value(QStringLiteral("qtVersion")).toString(), QString::fromLatin1(qVersion()));
 	QCOMPARE(root.value(QStringLiteral("restoreBlocked")).toBool(), false);
+	// Revision 2 writes the new field and no longer writes the retired one.
+	QCOMPARE(root.value(QStringLiteral("activeTabIsActivity")).toBool(), true);
+	QVERIFY(!root.contains(QStringLiteral("activityVisible")));
 
 	// Round trip through a fresh store.
 	UiStateStore reloaded(settings);
@@ -174,7 +182,7 @@ void TestUiStateStore::saveLoadRoundTrip() {
 	const UiState &loaded = reloaded.loadedState();
 	QCOMPARE(loaded.minimal, reference.minimal);
 	QCOMPARE(loaded.hideFrame, reference.hideFrame);
-	QCOMPARE(loaded.activityVisible, reference.activityVisible);
+	QCOMPARE(loaded.activeTabIsActivity, reference.activeTabIsActivity);
 	QCOMPARE(loaded.normalGeometry, reference.normalGeometry);
 	QCOMPARE(loaded.compactGeometry, reference.compactGeometry);
 	QCOMPARE(loaded.normalSplitterSizes, reference.normalSplitterSizes);
@@ -202,8 +210,8 @@ void TestUiStateStore::twoProfilesSameDirectory() {
 	const QByteArray bytesB = readBytes(sidecarB);
 
 	// Re-saving profile A must not disturb profile B's sidecar.
-	UiState stateA              = sampleState();
-	stateA.normalSplitterSizes  = QList< int >{ 100, 200 };
+	UiState stateA             = sampleState();
+	stateA.normalSplitterSizes = QList< int >{ 100, 200 };
 	QCOMPARE(storeA.save(stateA), UiStateStore::SaveResult::Saved);
 	QCOMPARE(readBytes(sidecarB), bytesB);
 }
@@ -229,12 +237,11 @@ void TestUiStateStore::schemaVersionHandling() {
 	check(makeSidecar(), UiStateStore::LoadResult::Loaded);
 
 	// Newer versions are unsupported - including files whose body would fail
-	// revision-1 validation (version gate runs before body validation).
+	// current-revision validation (version gate runs before body validation).
 	check(makeSidecar({ { QStringLiteral("version"), 2 } }), UiStateStore::LoadResult::Unsupported);
-	check(makeSidecar({ { QStringLiteral("version"), 2 },
-						{ QStringLiteral("minimal"), QStringLiteral("garbage") } }),
+	check(makeSidecar({ { QStringLiteral("version"), 2 }, { QStringLiteral("minimal"), QStringLiteral("garbage") } }),
 		  UiStateStore::LoadResult::Unsupported);
-	check(makeSidecar({ { QStringLiteral("layoutRevision"), 2 } }),
+	check(makeSidecar({ { QStringLiteral("layoutRevision"), UiStateStore::LayoutRevision + 1 } }),
 		  UiStateStore::LoadResult::Unsupported);
 
 	// Version 0 / negative / missing / wrong type: corruption, not older files
@@ -242,14 +249,12 @@ void TestUiStateStore::schemaVersionHandling() {
 	check(makeSidecar({ { QStringLiteral("version"), 0 } }), UiStateStore::LoadResult::Invalid);
 	check(makeSidecar({ { QStringLiteral("version"), -1 } }), UiStateStore::LoadResult::Invalid);
 	check(makeSidecar({ { QStringLiteral("version"), 1.5 } }), UiStateStore::LoadResult::Invalid);
-	check(makeSidecar({ { QStringLiteral("version"), QStringLiteral("1") } }),
-		  UiStateStore::LoadResult::Invalid);
+	check(makeSidecar({ { QStringLiteral("version"), QStringLiteral("1") } }), UiStateStore::LoadResult::Invalid);
 	check(makeSidecar(QJsonObject(), { QStringLiteral("version") }), UiStateStore::LoadResult::Invalid);
 	check(makeSidecar({ { QStringLiteral("layoutRevision"), 0 } }), UiStateStore::LoadResult::Invalid);
 	check(makeSidecar({ { QStringLiteral("layoutRevision"), QStringLiteral("1") } }),
 		  UiStateStore::LoadResult::Invalid);
-	check(makeSidecar(QJsonObject(), { QStringLiteral("layoutRevision") }),
-		  UiStateStore::LoadResult::Invalid);
+	check(makeSidecar(QJsonObject(), { QStringLiteral("layoutRevision") }), UiStateStore::LoadResult::Invalid);
 }
 
 void TestUiStateStore::newerVersionPreserved() {
@@ -257,8 +262,7 @@ void TestUiStateStore::newerVersionPreserved() {
 	const QString settings = settingsPath(dir);
 	const QString sidecar  = sidecarPathFor(settings);
 	const QByteArray newerBytes =
-		makeSidecar({ { QStringLiteral("version"), 2 },
-					   { QStringLiteral("minimal"), QStringLiteral("garbage") } });
+		makeSidecar({ { QStringLiteral("version"), 2 }, { QStringLiteral("minimal"), QStringLiteral("garbage") } });
 	QVERIFY(writeBytes(sidecar, newerBytes));
 
 	UiStateStore store(settings);
@@ -279,11 +283,53 @@ void TestUiStateStore::newerVersionPreserved() {
 	QCOMPARE(guard.save(sampleState()), UiStateStore::SaveResult::Saved);
 	QCOMPARE(guard.beginGeometryRestore(sampleState()), true);
 	QVERIFY(writeBytes(sidecar2, newerBytes));
-	QCOMPARE(guard.finishGeometryRestore(sampleState(), &error),
-			 UiStateStore::SaveResult::RefusedNewerVersion);
-	QCOMPARE(guard.abortGeometryRestore(sampleState(), &error),
-			 UiStateStore::SaveResult::RefusedNewerVersion);
+	QCOMPARE(guard.finishGeometryRestore(sampleState(), &error), UiStateStore::SaveResult::RefusedNewerVersion);
+	QCOMPARE(guard.abortGeometryRestore(sampleState(), &error), UiStateStore::SaveResult::RefusedNewerVersion);
 	QCOMPARE(readBytes(sidecar2), newerBytes);
+}
+
+void TestUiStateStore::layoutRevisionMigration() {
+	QTemporaryDir dir;
+	const QString settings = settingsPath(dir);
+	const QString sidecar  = sidecarPathFor(settings);
+
+	// A genuine revision-1 body, exactly what a revision-1 client wrote
+	// (makeSidecar): "activityVisible": true and no "activeTabIsActivity".
+	QVERIFY(writeBytes(sidecar, makeSidecar()));
+	// Drop the retired key in a second variant to cover its absence too.
+	const QByteArray withoutRetired = makeSidecar(QJsonObject(), { QStringLiteral("activityVisible") });
+
+	UiStateStore store(settings);
+	QString error;
+	QCOMPARE(store.load(&error), UiStateStore::LoadResult::Loaded);
+	// Migration semantics: the retired boolean is ignored (it never labeled a
+	// shipped control); the revision-2 field default-fills to Chat.
+	QCOMPARE(store.loadedState().layoutRevision, 1);
+	QCOMPARE(store.loadedState().activeTabIsActivity, false);
+	QCOMPARE(store.loadedState().minimal, false);
+
+	// The next save stamps the current revision (and drops the retired key).
+	QCOMPARE(store.save(sampleState(), &error), UiStateStore::SaveResult::Saved);
+	const QJsonObject root = parseObject(sidecar);
+	QCOMPARE(root.value(QStringLiteral("layoutRevision")).toInt(), UiStateStore::LayoutRevision);
+	QVERIFY(!root.contains(QStringLiteral("activityVisible")));
+	QCOMPARE(root.value(QStringLiteral("activeTabIsActivity")).toBool(), true);
+
+	// Reload: the saved revision-2 value round-trips.
+	QCOMPARE(store.load(&error), UiStateStore::LoadResult::Loaded);
+	QCOMPARE(store.loadedState().activeTabIsActivity, true);
+	QCOMPARE(store.loadedState().layoutRevision, UiStateStore::LayoutRevision);
+
+	// A revision-2 body without the new field default-fills (missing = Chat).
+	QVERIFY(writeBytes(sidecar, makeSidecar({ { QStringLiteral("layoutRevision"), UiStateStore::LayoutRevision } },
+											{ QStringLiteral("activeTabIsActivity") })));
+	QCOMPARE(store.load(&error), UiStateStore::LoadResult::Loaded);
+	QCOMPARE(store.loadedState().activeTabIsActivity, false);
+
+	// And the no-retired-key revision-1 variant migrates the same way.
+	QVERIFY(writeBytes(sidecar, withoutRetired));
+	QCOMPARE(store.load(&error), UiStateStore::LoadResult::Loaded);
+	QCOMPARE(store.loadedState().activeTabIsActivity, false);
 }
 
 void TestUiStateStore::invalidJsonAndTypes() {
@@ -300,37 +346,38 @@ void TestUiStateStore::invalidJsonAndTypes() {
 		QCOMPARE(readBytes(sidecar), json);
 		QCOMPARE(store.loadedState().minimal, false);
 		// Writes refuse to replace the invalid file.
-		QCOMPARE(store.save(sampleState(), &error),
-				 UiStateStore::SaveResult::RefusedInvalidExisting);
+		QCOMPARE(store.save(sampleState(), &error), UiStateStore::SaveResult::RefusedInvalidExisting);
 		QCOMPARE(readBytes(sidecar), json);
 	};
 
-	check(QByteArrayLiteral("{\"version\": 1,"));                       // truncated JSON
-	check(QByteArrayLiteral("[1, 2, 3]"));                              // non-object root
+	check(QByteArrayLiteral("{\"version\": 1,")); // truncated JSON
+	check(QByteArrayLiteral("[1, 2, 3]"));        // non-object root
 	check(makeSidecar({ { QStringLiteral("minimal"), QStringLiteral("yes") } }));
 	check(makeSidecar({ { QStringLiteral("hideFrame"), 1 } }));
-	check(makeSidecar({ { QStringLiteral("activityVisible"), QJsonValue() } }));
+	// The retired revision-1 "activityVisible" is an ignored key now - even a
+	// bad-typed value in a revision-1 body is not corruption. Revision 2's
+	// replacement field IS validated when present.
+	check(makeSidecar({ { QStringLiteral("layoutRevision"), UiStateStore::LayoutRevision },
+						{ QStringLiteral("activeTabIsActivity"), 1 } }));
 	check(makeSidecar({ { QStringLiteral("restoreBlocked"), QStringLiteral("true") } }));
-	check(makeSidecar(QJsonObject(), { QStringLiteral("qtVersion") }));  // required metadata
+	check(makeSidecar(QJsonObject(), { QStringLiteral("qtVersion") })); // required metadata
 	check(makeSidecar({ { QStringLiteral("qtVersion"), 62 } }));
 	check(makeSidecar({ { QStringLiteral("qtVersion"), QString() } }));
-	check(makeSidecar({ { QStringLiteral("normal"), 5 } }));             // non-object mode
-	check(makeSidecar({ { QStringLiteral("normal"),
-						   QJsonObject{ { QStringLiteral("geometry"), 123 } } } }));  // wrong type
-	check(makeSidecar({ { QStringLiteral("normal"),
-						   QJsonObject{ { QStringLiteral("splitterSizes"),
-										  QStringLiteral("x") } } } }));
-	check(makeSidecar({ { QStringLiteral("normal"),
-						   QJsonObject{ { QStringLiteral("splitterSizes"), QJsonArray{ 240, -1 } } } } }));
-	check(makeSidecar({ { QStringLiteral("normal"),
-						   QJsonObject{ { QStringLiteral("splitterSizes"), QJsonArray{ 1.5, 2 } } } } }));
-	check(makeSidecar({ { QStringLiteral("normal"),
-						   QJsonObject{ { QStringLiteral("splitterSizes"), QJsonArray{ 240 } } } } }));
-	check(makeSidecar({ { QStringLiteral("normal"),
-						   QJsonObject{ { QStringLiteral("splitterSizes"), QJsonArray{ 1, 70000 } } } } }));
-	check(makeSidecar({ { QStringLiteral("normal"),
-						   QJsonObject{ { QStringLiteral("splitterSizes"),
-										  QJsonArray{ 1, 2, 3, 4, 5, 6, 7, 8, 9 } } } } }));
+	check(makeSidecar({ { QStringLiteral("normal"), 5 } })); // non-object mode
+	check(makeSidecar(
+		{ { QStringLiteral("normal"), QJsonObject{ { QStringLiteral("geometry"), 123 } } } })); // wrong type
+	check(makeSidecar(
+		{ { QStringLiteral("normal"), QJsonObject{ { QStringLiteral("splitterSizes"), QStringLiteral("x") } } } }));
+	check(makeSidecar(
+		{ { QStringLiteral("normal"), QJsonObject{ { QStringLiteral("splitterSizes"), QJsonArray{ 240, -1 } } } } }));
+	check(makeSidecar(
+		{ { QStringLiteral("normal"), QJsonObject{ { QStringLiteral("splitterSizes"), QJsonArray{ 1.5, 2 } } } } }));
+	check(makeSidecar(
+		{ { QStringLiteral("normal"), QJsonObject{ { QStringLiteral("splitterSizes"), QJsonArray{ 240 } } } } }));
+	check(makeSidecar(
+		{ { QStringLiteral("normal"), QJsonObject{ { QStringLiteral("splitterSizes"), QJsonArray{ 1, 70000 } } } } }));
+	check(makeSidecar({ { QStringLiteral("normal"), QJsonObject{ { QStringLiteral("splitterSizes"),
+																   QJsonArray{ 1, 2, 3, 4, 5, 6, 7, 8, 9 } } } } }));
 }
 
 void TestUiStateStore::geometryValidation() {
@@ -347,15 +394,15 @@ void TestUiStateStore::geometryValidation() {
 	};
 
 	const auto withNormalGeometry = [](const QByteArray &geometry) {
-		return makeSidecar({ { QStringLiteral("normal"),
-							   QJsonObject{ { QStringLiteral("geometry"),
-											  QString::fromLatin1(geometry.toBase64()) } } } });
+		return makeSidecar(
+			{ { QStringLiteral("normal"),
+				QJsonObject{ { QStringLiteral("geometry"), QString::fromLatin1(geometry.toBase64()) } } } });
 	};
 
 	// Not base64.
-	checkInvalid(makeSidecar({ { QStringLiteral("normal"),
-								 QJsonObject{ { QStringLiteral("geometry"),
-												QStringLiteral("!!!! not base64 !!!!") } } } }));
+	checkInvalid(
+		makeSidecar({ { QStringLiteral("normal"),
+						QJsonObject{ { QStringLiteral("geometry"), QStringLiteral("!!!! not base64 !!!!") } } } }));
 	// Decodes, but below the minimum plausible size.
 	checkInvalid(withNormalGeometry(QByteArrayLiteral("01234567")));
 	// Decodes with the right magic, but oversized.
@@ -367,20 +414,19 @@ void TestUiStateStore::geometryValidation() {
 
 	// Oversized geometry passed programmatically is rejected before any write.
 	UiStateStore store(settings);
-	UiState bad          = sampleState();
-	bad.normalGeometry   = oversized;
+	UiState bad        = sampleState();
+	bad.normalGeometry = oversized;
 	QString error;
 	QCOMPARE(store.save(bad, &error), UiStateStore::SaveResult::InvalidInput);
 	QVERIFY(!error.isEmpty());
 
 	// Qt-version gate: geometry written by a different Qt version is dropped
 	// in favor of safe placement; simple preferences survive.
-	const QByteArray geometryJson =
-		makeSidecar({ { QStringLiteral("qtVersion"), QStringLiteral("5.0.0") },
-					   { QStringLiteral("minimal"), true },
-					   { QStringLiteral("normal"),
-						 QJsonObject{ { QStringLiteral("geometry"),
-										QString::fromLatin1(validGeometryBytes().toBase64()) } } } });
+	const QByteArray geometryJson = makeSidecar(
+		{ { QStringLiteral("qtVersion"), QStringLiteral("5.0.0") },
+		  { QStringLiteral("minimal"), true },
+		  { QStringLiteral("normal"),
+			QJsonObject{ { QStringLiteral("geometry"), QString::fromLatin1(validGeometryBytes().toBase64()) } } } });
 	QVERIFY(writeBytes(sidecar, geometryJson));
 	UiStateStore foreign(settings);
 	QCOMPARE(foreign.load(&error), UiStateStore::LoadResult::LoadedGeometryDropped);
@@ -418,8 +464,7 @@ void TestUiStateStore::splitterZeroPaneRoundTrip() {
 	const QString zeroSettings = settingsPath(dir, QStringLiteral("zero.json"));
 	QVERIFY(writeBytes(sidecarPathFor(zeroSettings),
 					   makeSidecar({ { QStringLiteral("normal"),
-									   QJsonObject{ { QStringLiteral("splitterSizes"),
-													  QJsonArray{ 0, 100 } } } } })));
+									   QJsonObject{ { QStringLiteral("splitterSizes"), QJsonArray{ 0, 100 } } } } })));
 	UiStateStore zeroed(zeroSettings);
 	QCOMPARE(zeroed.load(&error), UiStateStore::LoadResult::Loaded);
 	const QList< int > expectedZeroSizes{ 0, 100 };
@@ -472,11 +517,9 @@ void TestUiStateStore::failedWrites() {
 	QCOMPARE(readOnly.load(&error), UiStateStore::LoadResult::Loaded);
 	QCOMPARE(readOnly.save(sampleState(), &error), UiStateStore::SaveResult::WriteError);
 	QCOMPARE(readOnly.beginGeometryRestore(sampleState(), &error), false);
-	QCOMPARE(readOnly.finishGeometryRestore(sampleState(), &error),
-			 UiStateStore::SaveResult::InvalidOperation);
+	QCOMPARE(readOnly.finishGeometryRestore(sampleState(), &error), UiStateStore::SaveResult::InvalidOperation);
 	// Restore permissions so QTemporaryDir cleanup can remove the directory.
-	QVERIFY(roDirFile.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner
-									 | QFileDevice::ExeOwner));
+	QVERIFY(roDirFile.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner));
 #else
 	QSKIP("Read-only directory enforcement is not available on this platform");
 #endif
@@ -484,8 +527,8 @@ void TestUiStateStore::failedWrites() {
 
 void TestUiStateStore::restorationGuard() {
 	QTemporaryDir dir;
-	const QString settings = settingsPath(dir);
-	const QString sidecar  = sidecarPathFor(settings);
+	const QString settings  = settingsPath(dir);
+	const QString sidecar   = sidecarPathFor(settings);
 	const UiState candidate = sampleState();
 
 	UiStateStore store(settings);
@@ -497,12 +540,9 @@ void TestUiStateStore::restorationGuard() {
 	QCOMPARE(root.value(QStringLiteral("restoreBlocked")).toBool(), true);
 	QVERIFY(!root.value(QStringLiteral("normal")).toObject().contains(QStringLiteral("geometry")));
 	QVERIFY(!root.value(QStringLiteral("compact")).toObject().contains(QStringLiteral("geometry")));
-	QCOMPARE(root.value(QStringLiteral("normal")).toObject()
-				 .value(QStringLiteral("splitterSizes"))
-				 .toArray()
-				 .at(0)
-				 .toInt(),
-			 240);
+	QCOMPARE(
+		root.value(QStringLiteral("normal")).toObject().value(QStringLiteral("splitterSizes")).toArray().at(0).toInt(),
+		240);
 	QCOMPARE(root.value(QStringLiteral("minimal")).toBool(), true);
 
 	// Second begin is refused; a mid-protocol save stays latched and
@@ -519,17 +559,15 @@ void TestUiStateStore::restorationGuard() {
 	QCOMPARE(fresh.finishGeometryRestore(candidate), UiStateStore::SaveResult::InvalidOperation);
 
 	// A proper finish persists geometry together with the cleared latch.
-	UiState restored         = candidate;
-	restored.normalGeometry  = validGeometryBytes(80);
+	UiState restored        = candidate;
+	restored.normalGeometry = validGeometryBytes(80);
 	QCOMPARE(store.finishGeometryRestore(restored), UiStateStore::SaveResult::Saved);
 	root = parseObject(sidecar);
 	QCOMPARE(root.value(QStringLiteral("restoreBlocked")).toBool(), false);
-	QCOMPARE(QByteArray::fromBase64(root.value(QStringLiteral("normal"))
-										 .toObject()
-										 .value(QStringLiteral("geometry"))
-										 .toString()
-										 .toLatin1()),
-			 restored.normalGeometry);
+	QCOMPARE(
+		QByteArray::fromBase64(
+			root.value(QStringLiteral("normal")).toObject().value(QStringLiteral("geometry")).toString().toLatin1()),
+		restored.normalGeometry);
 	UiStateStore afterFinish(settings);
 	QCOMPARE(afterFinish.load(), UiStateStore::LoadResult::Loaded);
 	QCOMPARE(afterFinish.loadedState().normalGeometry, restored.normalGeometry);
@@ -546,8 +584,7 @@ void TestUiStateStore::restorationGuard() {
 
 	// begin is refused while the loaded file is latched.
 	const QString settingsC = settingsPath(dir, QStringLiteral("c.json"));
-	QVERIFY(writeBytes(sidecarPathFor(settingsC),
-					   makeSidecar({ { QStringLiteral("restoreBlocked"), true } })));
+	QVERIFY(writeBytes(sidecarPathFor(settingsC), makeSidecar({ { QStringLiteral("restoreBlocked"), true } })));
 	UiStateStore blocked(settingsC);
 	QCOMPARE(blocked.load(), UiStateStore::LoadResult::LoadedRestoreBlocked);
 	QCOMPARE(blocked.beginGeometryRestore(sampleState()), false);
@@ -559,8 +596,8 @@ void TestUiStateStore::interruptedRestorationRecovery() {
 	const QString sidecar  = sidecarPathFor(settings);
 
 	// Simulate the on-disk state after a crash between guard write and finish.
-	QVERIFY(writeBytes(sidecar, makeSidecar({ { QStringLiteral("restoreBlocked"), true },
-											  { QStringLiteral("minimal"), true } })));
+	QVERIFY(writeBytes(
+		sidecar, makeSidecar({ { QStringLiteral("restoreBlocked"), true }, { QStringLiteral("minimal"), true } })));
 	UiStateStore store(settings);
 	QString error;
 	QCOMPARE(store.load(&error), UiStateStore::LoadResult::LoadedRestoreBlocked);
@@ -570,8 +607,8 @@ void TestUiStateStore::interruptedRestorationRecovery() {
 
 	// An ordinary save keeps the latch and strips geometry - even when the
 	// caller passes geometry bytes.
-	UiState captured         = store.loadedState();
-	captured.normalGeometry  = validGeometryBytes();
+	UiState captured        = store.loadedState();
+	captured.normalGeometry = validGeometryBytes();
 	QCOMPARE(store.save(captured, &error), UiStateStore::SaveResult::Saved);
 	QJsonObject root = parseObject(sidecar);
 	QCOMPARE(root.value(QStringLiteral("restoreBlocked")).toBool(), true);
@@ -580,8 +617,7 @@ void TestUiStateStore::interruptedRestorationRecovery() {
 	QCOMPARE(reloaded.load(), UiStateStore::LoadResult::LoadedRestoreBlocked);
 
 	// The explicit reset releases the latch and clears geometry together.
-	QCOMPARE(store.save(captured, &error, /*clearRestoreBlock=*/true),
-			 UiStateStore::SaveResult::Saved);
+	QCOMPARE(store.save(captured, &error, /*clearRestoreBlock=*/true), UiStateStore::SaveResult::Saved);
 	root = parseObject(sidecar);
 	QCOMPARE(root.value(QStringLiteral("restoreBlocked")).toBool(), false);
 	QVERIFY(!root.value(QStringLiteral("normal")).toObject().contains(QStringLiteral("geometry")));
@@ -629,8 +665,7 @@ void TestUiStateStore::onDiskLatchAcrossInstances() {
 	// Only the explicit reset releases the on-disk latch - and it persists no
 	// geometry.
 	UiStateStore resetting(settings);
-	QCOMPARE(resetting.save(sampleState(), &error, /*clearRestoreBlock=*/true),
-			 UiStateStore::SaveResult::Saved);
+	QCOMPARE(resetting.save(sampleState(), &error, /*clearRestoreBlock=*/true), UiStateStore::SaveResult::Saved);
 	root = parseObject(sidecar);
 	QCOMPARE(root.value(QStringLiteral("restoreBlocked")).toBool(), false);
 	QVERIFY(!root.value(QStringLiteral("normal")).toObject().contains(QStringLiteral("geometry")));
@@ -657,8 +692,7 @@ void TestUiStateStore::restoreProtocolNegativePaths() {
 	// exactly like finish; nothing is written.
 	UiStateStore store(settings);
 	QString error;
-	QCOMPARE(store.abortGeometryRestore(sampleState(), &error),
-			 UiStateStore::SaveResult::InvalidOperation);
+	QCOMPARE(store.abortGeometryRestore(sampleState(), &error), UiStateStore::SaveResult::InvalidOperation);
 	QVERIFY(!error.isEmpty());
 	QVERIFY(!QFileInfo::exists(sidecar));
 
@@ -673,16 +707,13 @@ void TestUiStateStore::restoreProtocolNegativePaths() {
 
 	QFile roDirFile(roDir);
 	QVERIFY(roDirFile.setPermissions(QFileDevice::ReadOwner | QFileDevice::ExeOwner));
-	QCOMPARE(restoring.save(sampleState(), &error, /*clearRestoreBlock=*/true),
-			 UiStateStore::SaveResult::WriteError);
+	QCOMPARE(restoring.save(sampleState(), &error, /*clearRestoreBlock=*/true), UiStateStore::SaveResult::WriteError);
 	// Restore permissions so QTemporaryDir cleanup can remove the directory.
-	QVERIFY(roDirFile.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner
-									 | QFileDevice::ExeOwner));
+	QVERIFY(roDirFile.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner));
 
 	// The failed reset did not cancel the restoration: finish still works and
 	// persists geometry together with the released latch.
-	QCOMPARE(restoring.finishGeometryRestore(sampleState(), &error),
-			 UiStateStore::SaveResult::Saved);
+	QCOMPARE(restoring.finishGeometryRestore(sampleState(), &error), UiStateStore::SaveResult::Saved);
 	const QJsonObject root = parseObject(roSidecar);
 	QCOMPARE(root.value(QStringLiteral("restoreBlocked")).toBool(), false);
 	QVERIFY(root.value(QStringLiteral("normal")).toObject().contains(QStringLiteral("geometry")));
@@ -699,8 +730,7 @@ void TestUiStateStore::nestedNonexistentDirectories() {
 	// Multiple missing intermediate directories are preserved in the derived
 	// sidecar path (regression: they used to be dropped while walking up to
 	// the deepest existing ancestor).
-	const QString deepSettings =
-		dir.filePath(QStringLiteral("profiles/group/nested/deep/mumble_settings.json"));
+	const QString deepSettings = dir.filePath(QStringLiteral("profiles/group/nested/deep/mumble_settings.json"));
 	const QString deepSidecar =
 		canonical + QStringLiteral("/profiles/group/nested/deep/mumble_settings.json.new-ui.json");
 	QCOMPARE(UiStateStore::sidecarPathFor(deepSettings), deepSidecar);
@@ -766,7 +796,7 @@ void TestUiStateStore::sidecarPathResolution() {
 	QVERIFY(UiStateStore::sidecarPathFor(QString()).isEmpty());
 
 	// A symlinked settings directory resolves through to the real directory.
-	const QString realDir     = dir.filePath(QStringLiteral("real"));
+	const QString realDir      = dir.filePath(QStringLiteral("real"));
 	const QString settingsFile = QDir(realDir).filePath(QStringLiteral("mumble_settings.json"));
 	QVERIFY(QDir().mkpath(realDir));
 	QVERIFY(writeBytes(settingsFile, QByteArrayLiteral("{}")));
@@ -775,8 +805,7 @@ void TestUiStateStore::sidecarPathResolution() {
 		QSKIP("Cannot create symlinks on this platform");
 	}
 	QCOMPARE(UiStateStore::sidecarPathFor(QDir(aliasDir).filePath(QStringLiteral("mumble_settings.json"))),
-			 QDir(QFileInfo(realDir).canonicalFilePath())
-				 .filePath(QStringLiteral("mumble_settings.json.new-ui.json")));
+			 QDir(QFileInfo(realDir).canonicalFilePath()).filePath(QStringLiteral("mumble_settings.json.new-ui.json")));
 
 	// A symlinked settings file keeps its sidecar next to the symlink (the
 	// primary write path), not next to the link target: the shared saver
@@ -797,9 +826,8 @@ void TestUiStateStore::sidecarPathResolution() {
 void TestUiStateStore::unknownKeysTolerated() {
 	QTemporaryDir dir;
 	const QString settings = settingsPath(dir);
-	QVERIFY(writeBytes(sidecarPathFor(settings),
-					   makeSidecar({ { QStringLiteral("futureField"), QStringLiteral("x") },
-									 { QStringLiteral("anotherFutureField"), 42 } })));
+	QVERIFY(writeBytes(sidecarPathFor(settings), makeSidecar({ { QStringLiteral("futureField"), QStringLiteral("x") },
+															   { QStringLiteral("anotherFutureField"), 42 } })));
 	UiStateStore store(settings);
 	QString error;
 	QCOMPARE(store.load(&error), UiStateStore::LoadResult::Loaded);
@@ -820,8 +848,7 @@ void TestUiStateStore::quarantineRecovery() {
 	QVERIFY(writeBytes(sidecar, invalidBytes));
 	UiStateStore store(settings);
 	QString error;
-	QCOMPARE(store.save(sampleState(), &error),
-			 UiStateStore::SaveResult::RefusedInvalidExisting);
+	QCOMPARE(store.save(sampleState(), &error), UiStateStore::SaveResult::RefusedInvalidExisting);
 	QString quarantinePath;
 	QVERIFY(store.quarantineExisting(&quarantinePath));
 	QCOMPARE(quarantinePath, sidecar + QStringLiteral(".invalid"));
@@ -836,8 +863,8 @@ void TestUiStateStore::quarantineRecovery() {
 	QVERIFY(QFileInfo::exists(sidecar));
 
 	// Neither are newer-version files.
-	const QString settings2 = settingsPath(dir, QStringLiteral("second.json"));
-	const QString sidecar2  = sidecarPathFor(settings2);
+	const QString settings2     = settingsPath(dir, QStringLiteral("second.json"));
+	const QString sidecar2      = sidecarPathFor(settings2);
 	const QByteArray newerBytes = makeSidecar({ { QStringLiteral("version"), 2 } });
 	QVERIFY(writeBytes(sidecar2, newerBytes));
 	UiStateStore newer(settings2);
@@ -864,8 +891,7 @@ void TestUiStateStore::quarantineRecovery() {
 	QVERIFY(subDirFile.setPermissions(QFileDevice::ReadOwner | QFileDevice::ExeOwner));
 	UiStateStore stuck(settings3);
 	QCOMPARE(stuck.quarantineExisting(&error), false);
-	QVERIFY(subDirFile.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner
-									  | QFileDevice::ExeOwner));
+	QVERIFY(subDirFile.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner));
 	QCOMPARE(readBytes(sidecar3), invalidBytes);
 	QVERIFY(!QFileInfo::exists(sidecar3 + QStringLiteral(".invalid")));
 #else
@@ -875,7 +901,7 @@ void TestUiStateStore::quarantineRecovery() {
 
 void TestUiStateStore::sharedSettingsUntouched() {
 	QTemporaryDir dir;
-	const QString settings = settingsPath(dir);
+	const QString settings    = settingsPath(dir);
 	const QByteArray sentinel = readBytes(settings);
 
 	const QString sidecar = sidecarPathFor(settings);
@@ -885,8 +911,7 @@ void TestUiStateStore::sharedSettingsUntouched() {
 	QString error;
 	QVERIFY(writeBytes(sidecar, QByteArrayLiteral("corrupt")));
 	QCOMPARE(store.load(&error), UiStateStore::LoadResult::Invalid);
-	QCOMPARE(store.save(sampleState(), &error),
-			 UiStateStore::SaveResult::RefusedInvalidExisting);
+	QCOMPARE(store.save(sampleState(), &error), UiStateStore::SaveResult::RefusedInvalidExisting);
 	QVERIFY(store.quarantineExisting(&error));
 	QVERIFY(writeBytes(sidecar, makeSidecar({ { QStringLiteral("version"), 9 } })));
 	QCOMPARE(store.load(&error), UiStateStore::LoadResult::Unsupported);

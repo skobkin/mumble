@@ -8,6 +8,7 @@
 
 #include <set>
 
+#include <QDateTime>
 #include <QSystemTrayIcon>
 #include <QtCore/QMutex>
 #include <QtCore/QSet>
@@ -23,6 +24,8 @@
 #ifndef USE_NO_TTS
 class TextToSpeech;
 #endif
+
+class ConsoleSink;
 
 class LogConfig : public ConfigWidget, public Ui::LogConfig {
 private:
@@ -143,6 +146,12 @@ public:
 	QString msgName(MsgType t) const;
 	void setIgnore(MsgType t, int ignore = 1 << 30);
 	void clearIgnore();
+	/// Attaches (or detaches, passing nullptr) the console sink that accepted
+	/// entries are routed to. Safe to call repeatedly. The production sink is
+	/// the MainWindow; it registers after Log exists (before the deferred
+	/// startup logs replay) and detaches as its destructor's first statement
+	/// because Log outlives the window.
+	void setConsoleSink(ConsoleSink *sink);
 	static QString validHtml(const QString &html, QTextCursor *tc = nullptr);
 	static QString imageToImg(const QByteArray &format, const QByteArray &image);
 	static QString imageToImg(QImage img, int maxSize = 0);
@@ -167,6 +176,33 @@ signals:
 
 	/// Signal emitted when there was a message received whose type was configured to highlight the application
 	void highlightSpawned();
+
+private:
+	/// The presentation boundary accepted console entries are routed through
+	/// (see class ConsoleSink below). Null until the sink registers.
+	ConsoleSink *m_consoleSink = nullptr;
+};
+
+/// Presentation boundary for console output (new-UI architecture 4.3): Log
+/// owns every piece of policy (ignore counters, per-type output flags,
+/// highlight/balloon/sound/TTS decisions); accepted console entries are
+/// handed to the sink, which owns routing to the destination views. MainWindow
+/// implements this; tests inject a stub to observe the Log side of the
+/// contract without a window. The sink must outlive its registration or
+/// detach itself before dying.
+class ConsoleSink {
+public:
+	virtual ~ConsoleSink() = default;
+
+	/// Renders one accepted console entry (past the ignore counter and the
+	/// per-type console flag) into its destination view. The per-entry
+	/// presentation settings are snapshotted by the implementer.
+	virtual void appendConsoleEntry(Log::MsgType mt, const QString &console, bool ownMessage, const QDateTime &dt) = 0;
+
+	/// Whether entries of this type are currently visible to the user in
+	/// their routed destination. Gates highlight and balloon only - never
+	/// sound or TTS.
+	virtual bool isConsoleEntryVisible(Log::MsgType mt) const = 0;
 };
 
 class LogMessage {

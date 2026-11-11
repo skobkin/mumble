@@ -16,12 +16,14 @@
 #include "CustomElements.h"
 #include "UserView.h"
 #include "widgets/ChatPanel.h"
+#include "widgets/LogConsoleView.h"
 #include "widgets/MainWindowShell.h"
 
 #include <QApplication>
 #include <QHBoxLayout>
 #include <QMainWindow>
 #include <QPointer>
+#include <QScrollBar>
 #include <QSplitter>
 #include <QToolButton>
 
@@ -59,13 +61,31 @@ private slots:
 	void compactGeometryUnderNormalMinimum();
 	void repeatedModeSwitchCycles();
 
-	// The console-visibility query must reflect the actual log widget, not a
-	// stored flag.
+	// Per-destination visibility matrix of the stacked console pair: the
+	// inactive tab's view is really hidden (never zero-sized), minimal mode
+	// hides both, direct hides are reflected. This is the invariant
+	// MainWindow::isConsoleEntryVisible relies on - QWidget::isVisible() is
+	// the single truth.
 	void consoleVisibilityMatrix();
 
-	// Explicit tab chain tree -> log -> chat input. Deliberately the LAST
-	// widget test: it depends on the offscreen platform's focus state, which
-	// the QMainWindow used by minimalShrinkInsideWindow disturbs.
+	// The switch row toggles the stacked page (auto-exclusive buttons stay in
+	// sync, the consoleSwitched signal fires, programmatic switches and
+	// no-ops behave).
+	void consoleSwitchRow();
+
+	// Unread badges: counts format into the button text, 99+ cap, zero hides
+	// the counter, the activity warning state sets icon + tooltip and clears
+	// with it.
+	void tabBadgesAndWarningState();
+
+	// Tab switches swap the stacked page only: documents, content and scroll
+	// positions of both views survive arbitrarily many switches.
+	void tabSwitchPreservesScroll();
+
+	// Explicit tab chain tree -> switch row -> active console -> chat input.
+	// Deliberately the LAST widget test: it depends on the offscreen
+	// platform's focus state, which the QMainWindow used by
+	// minimalShrinkInsideWindow disturbs.
 	void tabOrderTraversal();
 
 	// The persistent voice control bar row (Stage 4): a stand-in strip
@@ -112,19 +132,23 @@ private:
 };
 
 void TestMainWindowShell::widgetIdentityAndAncestry() {
-	UserView *tree       = new UserView(nullptr);
-	LogTextBrowser *log  = new LogTextBrowser();
-	ChatbarTextEdit *chat = new ChatbarTextEdit();
+	UserView *tree              = new UserView(nullptr);
+	LogConsoleView *log         = new LogConsoleView();
+	LogConsoleView *activityLog = new LogConsoleView();
+	ChatbarTextEdit *chat       = new ChatbarTextEdit();
 
-	MainWindowShell shell(tree, log, chat);
+	MainWindowShell shell(tree, log, activityLog, chat);
 
 	QCOMPARE(shell.tree(), tree);
-	QCOMPARE(shell.chatPanel()->log(), log);
+	QCOMPARE(shell.chatPanel()->chatConsole(), log);
+	QCOMPARE(shell.chatPanel()->activityConsole(), activityLog);
+	QCOMPARE(shell.chatPanel()->activeConsole(), log);
 	QCOMPARE(shell.chatPanel()->chatInput(), chat);
 	QCOMPARE(shell.chatPanel(), chat->parentWidget());
 
 	QVERIFY(shell.isAncestorOf(tree));
 	QVERIFY(shell.isAncestorOf(log));
+	QVERIFY(shell.isAncestorOf(activityLog));
 	QVERIFY(shell.isAncestorOf(chat));
 
 	// The splitter holds exactly the tree and the chat panel.
@@ -144,17 +168,20 @@ void TestMainWindowShell::widgetIdentityAndAncestry() {
 }
 
 void TestMainWindowShell::adoptionReshowsHiddenContent() {
-	UserView *tree       = new UserView(nullptr);
-	LogTextBrowser *log  = new LogTextBrowser();
-	ChatbarTextEdit *chat = new ChatbarTextEdit();
+	UserView *tree              = new UserView(nullptr);
+	LogConsoleView *log         = new LogConsoleView();
+	LogConsoleView *activityLog = new LogConsoleView();
+	ChatbarTextEdit *chat       = new ChatbarTextEdit();
 
 	// Simulate the hiding side effect of QDockWidget::setWidget(nullptr)
 	log->hide();
+	activityLog->hide();
 	chat->hide();
 	QVERIFY(!log->isVisible());
+	QVERIFY(!activityLog->isVisible());
 	QVERIFY(!chat->isVisible());
 
-	MainWindowShell shell(tree, log, chat);
+	MainWindowShell shell(tree, log, activityLog, chat);
 	shell.resize(1000, 700);
 	shell.show();
 	drainEvents();
@@ -162,19 +189,25 @@ void TestMainWindowShell::adoptionReshowsHiddenContent() {
 	QVERIFY(shell.isVisible());
 	QVERIFY(log->isVisible());
 	QVERIFY(chat->isVisible());
+	// The inactive stacked page stays hidden by design (the stack owns its
+	// visibility); it shows when its tab becomes active.
+	QVERIFY(!activityLog->isVisible());
+	shell.chatPanel()->setActiveConsole(activityLog);
+	QVERIFY(activityLog->isVisible());
 	QVERIFY(!shell.isMinimal());
 }
 
 void TestMainWindowShell::treeAdoptionReshowsTree() {
-	UserView *tree       = new UserView(nullptr);
-	LogTextBrowser *log  = new LogTextBrowser();
-	ChatbarTextEdit *chat = new ChatbarTextEdit();
+	UserView *tree              = new UserView(nullptr);
+	LogConsoleView *log         = new LogConsoleView();
+	LogConsoleView *activityLog = new LogConsoleView();
+	ChatbarTextEdit *chat       = new ChatbarTextEdit();
 
 	// takeCentralWidget() reparents the tree to null, which hides it
 	tree->hide();
 	QVERIFY(!tree->isVisible());
 
-	MainWindowShell shell(tree, log, chat);
+	MainWindowShell shell(tree, log, activityLog, chat);
 	shell.resize(1000, 700);
 	shell.show();
 	drainEvents();
@@ -184,9 +217,10 @@ void TestMainWindowShell::treeAdoptionReshowsTree() {
 
 void TestMainWindowShell::destructionWithPendingEvents() {
 	QPointer< UserView > tree(new UserView(nullptr));
-	QPointer< LogTextBrowser > log(new LogTextBrowser());
+	QPointer< LogConsoleView > log(new LogConsoleView());
+	QPointer< LogConsoleView > activityLog(new LogConsoleView());
 	QPointer< ChatbarTextEdit > chat(new ChatbarTextEdit());
-	QPointer< MainWindowShell > shell(new MainWindowShell(tree, log, chat));
+	QPointer< MainWindowShell > shell(new MainWindowShell(tree, log, activityLog, chat));
 
 	shell->show();
 	drainEvents();
@@ -204,15 +238,17 @@ void TestMainWindowShell::destructionWithPendingEvents() {
 	// the tree, not with the external pointers.
 	QVERIFY(tree.isNull());
 	QVERIFY(log.isNull());
+	QVERIFY(activityLog.isNull());
 	QVERIFY(chat.isNull());
 }
 
 void TestMainWindowShell::splitterRoundTrip() {
-	UserView *tree       = new UserView(nullptr);
-	LogTextBrowser *log  = new LogTextBrowser();
-	ChatbarTextEdit *chat = new ChatbarTextEdit();
+	UserView *tree              = new UserView(nullptr);
+	LogConsoleView *log         = new LogConsoleView();
+	LogConsoleView *activityLog = new LogConsoleView();
+	ChatbarTextEdit *chat       = new ChatbarTextEdit();
 
-	MainWindowShell shell(tree, log, chat);
+	MainWindowShell shell(tree, log, activityLog, chat);
 	shell.resize(1000, 700);
 	shell.show();
 	drainEvents();
@@ -235,11 +271,12 @@ void TestMainWindowShell::splitterRoundTrip() {
 }
 
 void TestMainWindowShell::narrowResizeHonorsMinimums() {
-	UserView *tree       = new UserView(nullptr);
-	LogTextBrowser *log  = new LogTextBrowser();
-	ChatbarTextEdit *chat = new ChatbarTextEdit();
+	UserView *tree              = new UserView(nullptr);
+	LogConsoleView *log         = new LogConsoleView();
+	LogConsoleView *activityLog = new LogConsoleView();
+	ChatbarTextEdit *chat       = new ChatbarTextEdit();
 
-	MainWindowShell shell(tree, log, chat);
+	MainWindowShell shell(tree, log, activityLog, chat);
 	shell.resize(1000, 700);
 	shell.show();
 	drainEvents();
@@ -261,16 +298,17 @@ void TestMainWindowShell::narrowResizeHonorsMinimums() {
 }
 
 void TestMainWindowShell::compactGeometryUnderNormalMinimum() {
-	UserView *tree       = new UserView(nullptr);
-	LogTextBrowser *log  = new LogTextBrowser();
-	ChatbarTextEdit *chat = new ChatbarTextEdit();
+	UserView *tree              = new UserView(nullptr);
+	LogConsoleView *log         = new LogConsoleView();
+	LogConsoleView *activityLog = new LogConsoleView();
+	ChatbarTextEdit *chat       = new ChatbarTextEdit();
 
-	MainWindowShell shell(tree, log, chat);
+	MainWindowShell shell(tree, log, activityLog, chat);
 	shell.resize(1000, 700);
 	shell.show();
 	drainEvents();
 
-	QSplitter *splitter = qobject_cast< QSplitter * >(splitterOf(&shell));
+	QSplitter *splitter   = qobject_cast< QSplitter * >(splitterOf(&shell));
 	const int handleWidth = splitter->handleWidth() > 0 ? splitter->handleWidth() : 5;
 	// Read the pane minimum before the mode change: minimal mode releases the
 	// chat panel's minimum on purpose.
@@ -290,16 +328,17 @@ void TestMainWindowShell::compactGeometryUnderNormalMinimum() {
 }
 
 void TestMainWindowShell::repeatedModeSwitchCycles() {
-	UserView *tree       = new UserView(nullptr);
-	LogTextBrowser *log  = new LogTextBrowser();
-	ChatbarTextEdit *chat = new ChatbarTextEdit();
+	UserView *tree              = new UserView(nullptr);
+	LogConsoleView *log         = new LogConsoleView();
+	LogConsoleView *activityLog = new LogConsoleView();
+	ChatbarTextEdit *chat       = new ChatbarTextEdit();
 
-	MainWindowShell shell(tree, log, chat);
+	MainWindowShell shell(tree, log, activityLog, chat);
 	shell.resize(1000, 700);
 	shell.show();
 	drainEvents();
 
-	QSplitter *splitter = qobject_cast< QSplitter * >(splitterOf(&shell));
+	QSplitter *splitter   = qobject_cast< QSplitter * >(splitterOf(&shell));
 	const int handleWidth = splitter->handleWidth() > 0 ? splitter->handleWidth() : 5;
 	// Read the pane minimum before any mode change: minimal mode releases the
 	// chat panel's minimum on purpose.
@@ -333,15 +372,17 @@ void TestMainWindowShell::repeatedModeSwitchCycles() {
 	// The composer (and the rest of the adopted family) survived the cycles
 	// unchanged.
 	QCOMPARE(shell.chatPanel()->chatInput(), chat);
-	QCOMPARE(shell.chatPanel()->log(), log);
+	QCOMPARE(shell.chatPanel()->chatConsole(), log);
+	QCOMPARE(shell.chatPanel()->activityConsole(), activityLog);
 	QCOMPARE(shell.tree(), tree);
 	QVERIFY(chat->isVisible());
 }
 
 void TestMainWindowShell::minimalShrinkInsideWindow() {
-	UserView *tree       = new UserView(nullptr);
-	LogTextBrowser *log  = new LogTextBrowser();
-	ChatbarTextEdit *chat = new ChatbarTextEdit();
+	UserView *tree              = new UserView(nullptr);
+	LogConsoleView *log         = new LogConsoleView();
+	LogConsoleView *activityLog = new LogConsoleView();
+	ChatbarTextEdit *chat       = new ChatbarTextEdit();
 
 	// The window MUST be declared before the shell: destruction runs in
 	// reverse declaration order, so the stack shell object is destroyed (and
@@ -352,7 +393,7 @@ void TestMainWindowShell::minimalShrinkInsideWindow() {
 	// focus-dependent tests rely on their own top-level widgets being active
 	// for setFocus()/keyClick() to work.
 	window.setAttribute(Qt::WA_ShowWithoutActivating);
-	MainWindowShell shell(tree, log, chat);
+	MainWindowShell shell(tree, log, activityLog, chat);
 	window.setCentralWidget(&shell);
 	window.resize(1000, 700);
 	window.show();
@@ -372,43 +413,174 @@ void TestMainWindowShell::minimalShrinkInsideWindow() {
 }
 
 void TestMainWindowShell::consoleVisibilityMatrix() {
-	UserView *tree       = new UserView(nullptr);
-	LogTextBrowser *log  = new LogTextBrowser();
-	ChatbarTextEdit *chat = new ChatbarTextEdit();
+	UserView *tree              = new UserView(nullptr);
+	LogConsoleView *log         = new LogConsoleView();
+	LogConsoleView *activityLog = new LogConsoleView();
+	ChatbarTextEdit *chat       = new ChatbarTextEdit();
 
-	MainWindowShell shell(tree, log, chat);
+	MainWindowShell shell(tree, log, activityLog, chat);
 	shell.resize(1000, 700);
 	shell.show();
 	drainEvents();
 
-	// Normal mode: visible.
-	QVERIFY(shell.isConsoleVisible());
+	// Normal mode, Chat tab active: the chat view is on screen, the activity
+	// view is REALLY hidden (stacked pair, not zero-sized) - the invariant
+	// MainWindow::isConsoleEntryVisible answers through.
+	QVERIFY(log->isVisible());
+	QVERIFY(!activityLog->isVisible());
 
-	// Minimal mode: the chat panel (holding the log) is hidden.
+	// Switching tabs flips exactly the two visibilities.
+	shell.chatPanel()->setActiveConsole(activityLog);
+	drainEvents();
+	QVERIFY(!log->isVisible());
+	QVERIFY(activityLog->isVisible());
+
+	// Minimal mode: the whole panel (both views) hides.
 	shell.setMinimal(true);
-	QVERIFY(!shell.isConsoleVisible());
+	drainEvents();
+	QVERIFY(!log->isVisible());
+	QVERIFY(!activityLog->isVisible());
 
-	// Back to normal.
 	shell.setMinimal(false);
-	QVERIFY(shell.isConsoleVisible());
-
-	// Hiding the log widget directly must be reflected - the query is bound to
-	// the actual widget, not a stored flag.
-	log->hide();
 	drainEvents();
-	QVERIFY(!shell.isConsoleVisible());
+	QVERIFY(!log->isVisible());
+	QVERIFY(activityLog->isVisible());
 
-	log->show();
+	// Hiding a view directly must be reflected - visibility is bound to the
+	// actual widget, never a stored flag.
+	activityLog->hide();
 	drainEvents();
-	QVERIFY(shell.isConsoleVisible());
+	QVERIFY(!activityLog->isVisible());
+	activityLog->show();
+	drainEvents();
+	QVERIFY(activityLog->isVisible());
+}
+
+void TestMainWindowShell::consoleSwitchRow() {
+	UserView *tree              = new UserView(nullptr);
+	LogConsoleView *log         = new LogConsoleView();
+	LogConsoleView *activityLog = new LogConsoleView();
+	ChatbarTextEdit *chat       = new ChatbarTextEdit();
+
+	MainWindowShell shell(tree, log, activityLog, chat);
+
+	// Initial state: Chat active, its button checked.
+	QCOMPARE(shell.chatPanel()->activeConsole(), log);
+	QVERIFY(shell.chatPanel()->chatTabButton()->isChecked());
+	QVERIFY(!shell.chatPanel()->activityTabButton()->isChecked());
+
+	QSignalSpy switched(shell.chatPanel(), &ChatPanel::consoleSwitched);
+
+	// Programmatic switch: page, buttons and signal agree.
+	shell.chatPanel()->setActiveConsole(activityLog);
+	QCOMPARE(shell.chatPanel()->activeConsole(), activityLog);
+	QCOMPARE(shell.chatPanel()->activityTabActive(), true);
+	QVERIFY(!shell.chatPanel()->chatTabButton()->isChecked());
+	QVERIFY(shell.chatPanel()->activityTabButton()->isChecked());
+	QCOMPARE(switched.count(), 1);
+	QCOMPARE(switched.at(0).at(0).toBool(), true);
+
+	// Switching to the already-active tab is a no-op (no signal).
+	shell.chatPanel()->setActiveConsole(activityLog);
+	QCOMPARE(switched.count(), 1);
+
+	// Unknown pointers are ignored.
+	shell.chatPanel()->setActiveConsole(nullptr);
+	QCOMPARE(shell.chatPanel()->activeConsole(), activityLog);
+
+	// Back via the button: exactly as the user drives it.
+	shell.chatPanel()->chatTabButton()->click();
+	QCOMPARE(shell.chatPanel()->activeConsole(), log);
+	QCOMPARE(switched.count(), 2);
+	QCOMPARE(switched.at(1).at(0).toBool(), false);
+	QVERIFY(shell.chatPanel()->chatTabButton()->isChecked());
+
+	shell.chatPanel()->activityTabButton()->click();
+	QCOMPARE(shell.chatPanel()->activeConsole(), activityLog);
+	QCOMPARE(switched.count(), 3);
+}
+
+void TestMainWindowShell::tabBadgesAndWarningState() {
+	UserView *tree              = new UserView(nullptr);
+	LogConsoleView *log         = new LogConsoleView();
+	LogConsoleView *activityLog = new LogConsoleView();
+	ChatbarTextEdit *chat       = new ChatbarTextEdit();
+
+	MainWindowShell shell(tree, log, activityLog, chat);
+	ChatPanel *panel = shell.chatPanel();
+
+	// Zero hides the counter entirely.
+	panel->setChatBadge(0);
+	panel->setActivityBadge(0, false);
+	QVERIFY(!panel->chatTabButton()->text().contains(QLatin1Char('(')));
+	QVERIFY(!panel->activityTabButton()->text().contains(QLatin1Char('(')));
+	QVERIFY(panel->activityTabButton()->icon().isNull());
+
+	// Counts format into the label (mnemonic preserved).
+	panel->setChatBadge(3);
+	QVERIFY(panel->chatTabButton()->text().contains(QLatin1String("(3)")));
+	QVERIFY(panel->chatTabButton()->text().contains(QLatin1String("Chat")));
+
+	panel->setActivityBadge(42, false);
+	QVERIFY(panel->activityTabButton()->text().contains(QLatin1String("(42)")));
+	QVERIFY(panel->activityTabButton()->icon().isNull());
+
+	// The cap: anything above 99 shows "99+".
+	panel->setChatBadge(100);
+	QVERIFY(panel->chatTabButton()->text().contains(QLatin1String("(99+)")));
+
+	// Warning state: icon + tooltip appear, and clear with it.
+	panel->setActivityBadge(1, true);
+	QVERIFY(!panel->activityTabButton()->icon().isNull());
+	QVERIFY(!panel->activityTabButton()->toolTip().isEmpty());
+	panel->setActivityBadge(0, false);
+	QVERIFY(panel->activityTabButton()->icon().isNull());
+}
+
+void TestMainWindowShell::tabSwitchPreservesScroll() {
+	UserView *tree              = new UserView(nullptr);
+	LogConsoleView *log         = new LogConsoleView();
+	LogConsoleView *activityLog = new LogConsoleView();
+	ChatbarTextEdit *chat       = new ChatbarTextEdit();
+
+	MainWindowShell shell(tree, log, activityLog, chat);
+	shell.resize(400, 300);
+	shell.show();
+	drainEvents();
+
+	// Tall content in both views so both scroll bars have a range.
+	const QDateTime now = QDateTime::currentDateTime();
+	for (int i = 0; i < 40; ++i) {
+		log->appendEntry(now, QString::fromLatin1("<p>chat %1 a</p><p>b</p><p>c</p>").arg(i), false,
+						 LogConsoleView::RenderSettings{ 3, true });
+		activityLog->appendEntry(now, QString::fromLatin1("<p>act %1 a</p><p>b</p><p>c</p>").arg(i), false,
+								 LogConsoleView::RenderSettings{ 3, true });
+	}
+	drainEvents();
+	QVERIFY(log->verticalScrollBar()->maximum() > 0);
+	QVERIFY(activityLog->verticalScrollBar()->maximum() > 0);
+
+	log->verticalScrollBar()->setValue(log->verticalScrollBar()->maximum() / 3);
+	const int chatScroll   = log->verticalScrollBar()->value();
+	const QString chatText = log->document()->toPlainText();
+
+	// Arbitrarily many switches: content and scroll never change.
+	for (int round = 0; round < 3; ++round) {
+		shell.chatPanel()->setActiveConsole(activityLog);
+		shell.chatPanel()->setActiveConsole(log);
+	}
+	QCOMPARE(log->document()->toPlainText(), chatText);
+	QCOMPARE(log->verticalScrollBar()->value(), chatScroll);
+	QCOMPARE(shell.chatPanel()->chatConsole(), log);
 }
 
 void TestMainWindowShell::tabOrderTraversal() {
-	UserView *tree       = new UserView(nullptr);
-	LogTextBrowser *log  = new LogTextBrowser();
-	ChatbarTextEdit *chat = new ChatbarTextEdit();
+	UserView *tree              = new UserView(nullptr);
+	LogConsoleView *log         = new LogConsoleView();
+	LogConsoleView *activityLog = new LogConsoleView();
+	ChatbarTextEdit *chat       = new ChatbarTextEdit();
 
-	MainWindowShell shell(tree, log, chat);
+	MainWindowShell shell(tree, log, activityLog, chat);
 	shell.resize(1000, 700);
 	shell.show();
 	drainEvents();
@@ -417,22 +589,30 @@ void TestMainWindowShell::tabOrderTraversal() {
 	drainEvents();
 	QCOMPARE(QApplication::focusWidget(), static_cast< QWidget * >(tree));
 
-	// tree -> log
+	// tree -> switch row (chat tab, then activity tab)
 	QTest::keyClick(tree, Qt::Key_Tab);
+	QCOMPARE(QApplication::focusWidget(), static_cast< QWidget * >(shell.chatPanel()->chatTabButton()));
+	QTest::keyClick(shell.chatPanel()->chatTabButton(), Qt::Key_Tab);
+	QCOMPARE(QApplication::focusWidget(), static_cast< QWidget * >(shell.chatPanel()->activityTabButton()));
+
+	// switch row -> active console (the chat view; the hidden activity view
+	// is skipped dynamically)
+	QTest::keyClick(shell.chatPanel()->activityTabButton(), Qt::Key_Tab);
 	QCOMPARE(QApplication::focusWidget(), static_cast< QWidget * >(log));
 
-	// log -> chat input (ChatbarTextEdit handles Tab itself, so the chain is
-	// asserted up to it)
+	// console -> chat input (ChatbarTextEdit handles Tab itself once it HAS
+	// focus, so the chain is asserted up to landing in it)
 	QTest::keyClick(log, Qt::Key_Tab);
 	QCOMPARE(QApplication::focusWidget(), static_cast< QWidget * >(chat));
 }
 
 void TestMainWindowShell::voiceBarPersistentAndTraversal() {
-	UserView *tree       = new UserView(nullptr);
-	LogTextBrowser *log  = new LogTextBrowser();
-	ChatbarTextEdit *chat = new ChatbarTextEdit();
+	UserView *tree              = new UserView(nullptr);
+	LogConsoleView *log         = new LogConsoleView();
+	LogConsoleView *activityLog = new LogConsoleView();
+	ChatbarTextEdit *chat       = new ChatbarTextEdit();
 
-	MainWindowShell shell(tree, log, chat);
+	MainWindowShell shell(tree, log, activityLog, chat);
 
 	// Stand-in control strip: a plain QWidget with two focusable buttons.
 	// The shell must stay free of VoiceControlBar/Global dependencies, so
@@ -498,6 +678,10 @@ void TestMainWindowShell::voiceBarPersistentAndTraversal() {
 	drainEvents();
 	QCOMPARE(QApplication::focusWidget(), static_cast< QWidget * >(tree));
 	QTest::keyClick(tree, Qt::Key_Tab);
+	QCOMPARE(QApplication::focusWidget(), static_cast< QWidget * >(shell.chatPanel()->chatTabButton()));
+	QTest::keyClick(shell.chatPanel()->chatTabButton(), Qt::Key_Tab);
+	QCOMPARE(QApplication::focusWidget(), static_cast< QWidget * >(shell.chatPanel()->activityTabButton()));
+	QTest::keyClick(shell.chatPanel()->activityTabButton(), Qt::Key_Tab);
 	QCOMPARE(QApplication::focusWidget(), static_cast< QWidget * >(log));
 	QTest::keyClick(log, Qt::Key_Tab);
 	QCOMPARE(QApplication::focusWidget(), static_cast< QWidget * >(firstButton));
@@ -510,6 +694,10 @@ void TestMainWindowShell::voiceBarPersistentAndTraversal() {
 	QTest::keyClick(firstButton, Qt::Key_Backtab);
 	QCOMPARE(QApplication::focusWidget(), static_cast< QWidget * >(log));
 	QTest::keyClick(log, Qt::Key_Backtab);
+	QCOMPARE(QApplication::focusWidget(), static_cast< QWidget * >(shell.chatPanel()->activityTabButton()));
+	QTest::keyClick(shell.chatPanel()->activityTabButton(), Qt::Key_Backtab);
+	QCOMPARE(QApplication::focusWidget(), static_cast< QWidget * >(shell.chatPanel()->chatTabButton()));
+	QTest::keyClick(shell.chatPanel()->chatTabButton(), Qt::Key_Backtab);
 	QCOMPARE(QApplication::focusWidget(), static_cast< QWidget * >(tree));
 
 	// With the chat input enabled again, Backtab out of the bar's head lands
@@ -550,11 +738,12 @@ void TestMainWindowShell::voiceBarPersistentAndTraversal() {
 }
 
 void TestMainWindowShell::focusCyclingCoversBarAndMinimal() {
-	UserView *tree       = new UserView(nullptr);
-	LogTextBrowser *log  = new LogTextBrowser();
-	ChatbarTextEdit *chat = new ChatbarTextEdit();
+	UserView *tree              = new UserView(nullptr);
+	LogConsoleView *log         = new LogConsoleView();
+	LogConsoleView *activityLog = new LogConsoleView();
+	ChatbarTextEdit *chat       = new ChatbarTextEdit();
 
-	MainWindowShell shell(tree, log, chat);
+	MainWindowShell shell(tree, log, activityLog, chat);
 
 	// The same stand-in strip shape as voiceBarPersistentAndTraversal: one
 	// focusable button inside the persistent bar row.
@@ -607,6 +796,14 @@ void TestMainWindowShell::focusCyclingCoversBarAndMinimal() {
 	drainEvents();
 	QCOMPARE(shell.focusNextMainArea(), static_cast< QWidget * >(tree));
 	chat->setEnabled(true);
+
+	// With the Activity tab active, the cycle's first area is the activity
+	// view - always the ACTIVE console, never a fixed one.
+	shell.chatPanel()->setActiveConsole(activityLog);
+	barButton->setFocus();
+	drainEvents();
+	QCOMPARE(shell.focusNextMainArea(), static_cast< QWidget * >(activityLog));
+	shell.chatPanel()->setActiveConsole(log);
 }
 
 QTEST_MAIN(TestMainWindowShell)

@@ -816,6 +816,11 @@ int main(int argc, char **argv) {
 	// before the MainWindow one, does not make sense. if you need logging before this
 	// point, use Log::logOrDefer()
 	Global::get().l = new Log();
+	// Register the window as the console sink BEFORE the deferred startup logs
+	// replay, so they are routed into the live console destinations instead of
+	// being dropped by the null-sink guard. The window detaches itself as the
+	// first statement of its destructor (it dies before Log does).
+	Global::get().l->setConsoleSink(Global::get().mw);
 	Global::get().l->processDeferredLogs();
 
 	Global::get().trayIcon = new TrayIcon();

@@ -61,6 +61,7 @@
 #include "VersionCheck.h"
 #include "ViewCert.h"
 #include "VoiceRecorderDialog.h"
+#include "widgets/ChatPanel.h"
 #include "widgets/ConnectionHeader.h"
 #include "widgets/LogConsoleView.h"
 #include "widgets/MainWindowShell.h"
@@ -526,13 +527,25 @@ void MainWindow::setupGui() {
 	qtvUsers->setAttribute(Qt::WA_MacShowFocusRect, false);
 	qteChat->setAttribute(Qt::WA_MacShowFocusRect, false);
 	qteChat->setFrameShape(QFrame::NoFrame);
-	qteLog->setFrameStyle(QFrame::NoFrame);
 #endif
 
-	// The console view owns its document (see LogConsoleView); the settings
-	// derived limits are pushed through the widget's forwarders.
-	qteLog->setLogBlockLimit(Global::get().s.iMaxLogBlocks);
-	qteLog->applyTheme(qApp->styleSheet());
+	// The two console destinations (chat messages vs. server-wide activity),
+	// code-created: the legacy combined log dock is gone from the .ui. Each
+	// view owns its document (see LogConsoleView) and renders entries only
+	// through appendConsoleEntry below - MainWindow is Log's ConsoleSink.
+	m_chatConsole     = new LogConsoleView(this);
+	m_activityConsole = new LogConsoleView(this);
+	m_chatConsole->setAccessibleName(tr("Chat messages"));
+	m_activityConsole->setAccessibleName(tr("Activity log"));
+	m_chatConsole->setWhatsThis(tr("This shows the chat messages (channel, tree and private) of the current session."));
+	m_activityConsole->setWhatsThis(
+		tr("This shows all recent activity. Connecting to servers, errors and information messages all show up "
+		   "here.<br />To configure exactly which messages show up here, use the <b>Settings</b> command from the "
+		   "menu."));
+	// The settings-derived limits and theme are pushed through the window's
+	// forwarders so every destination gets them.
+	applyConsoleBlockLimit();
+	setConsoleStyleSheet(qApp->styleSheet());
 
 	pmModel = new UserModel(qtvUsers);
 	qtvUsers->setModel(pmModel);
@@ -616,16 +629,21 @@ void MainWindow::setupGui() {
 	// (setWidget(nullptr) hides them; the shell re-shows them), then take the
 	// tree out of its central-widget role before the shell takes it over
 	// (doing it afterwards would steal the tree back out of the shell's
-	// splitter), hand all three widgets to the shell, make the shell the new
+	// splitter), hand the widgets to the shell, make the shell the new
 	// central widget, and only then delete the now-empty dock containers. This
 	// all happens inside the constructor: no posted events reference the docks
-	// and no auto-connected slots exist for them.
-	qdwLog->setWidget(nullptr);
+	// and no auto-connected slots exist for them. The console views are born
+	// un-docked (created above), so only the chat input is detached here.
 	qdwChat->setWidget(nullptr);
 	QWidget *adoptedTree = takeCentralWidget();
 	Q_ASSERT(adoptedTree == qtvUsers);
 
-	m_shell  = new MainWindowShell(qtvUsers, qteLog, qteChat, this);
+	m_shell = new MainWindowShell(qtvUsers, m_chatConsole, m_activityConsole, qteChat, this);
+	// The persisted console tab (sidecar layoutRevision 2; Chat is the
+	// default).
+	if (m_uiStatePersistence->state().activeTabIsActivity) {
+		m_shell->chatPanel()->setActiveConsole(m_activityConsole);
+	}
 	m_header = new ConnectionHeader(qaServerConnect, qaServerDisconnect, qaServerInformation, qaSearch);
 	m_shell->setHeaderWidget(m_header);
 	// Persistent voice control strip (normal AND minimal mode). Pure
@@ -633,16 +651,37 @@ void MainWindow::setupGui() {
 	// snapshots; the handlers above remain the single authority.
 	m_voiceBar = new VoiceControlBar(qaAudioMute, qaAudioDeaf, qaConfigDialog);
 	m_shell->setVoiceBar(m_voiceBar);
-	// Continue the shell's keyboard chain (tree -> log -> chat input) into
-	// the bar's internal chain through its head. The bar itself never takes
-	// focus (NoFocus container), so the link must target a child.
+	// Continue the shell's keyboard chain (tree -> switch row -> consoles ->
+	// chat input) into the bar's internal chain through its head. The bar
+	// itself never takes focus (NoFocus container), so the link must target a
+	// child.
 	QWidget::setTabOrder(qteChat, m_voiceBar->focusEntryWidget());
 	setCentralWidget(m_shell);
 
-	delete qdwLog;
+	// Both console destinations share the same interaction handlers; the
+	// source view is always passed explicitly, so image resolution and link
+	// handling can never cross documents (commit 2's parameterization).
+	for (LogConsoleView *view : { m_chatConsole, m_activityConsole }) {
+		connect(view, &QWidget::customContextMenuRequested, this,
+				[this, view](const QPoint &pos) { displayLogContextMenu(view, pos); });
+		connect(view, &QTextBrowser::anchorClicked, this, &MainWindow::handleLogLinkActivated);
+		connect(view, &QTextBrowser::highlighted, this,
+				[this, view](const QUrl &url) { handleLogLinkHighlighted(view, url); });
+		// Unread badges clear on the view's actual Show (tab switch, return
+		// from minimal mode): the entries are on screen now, hence seen.
+		view->installEventFilter(this);
+	}
+
+	// Ctrl+Shift+L toggles between the chat and activity tabs (also the
+	// menu/a11y surface for the switch).
+	QAction *qaConsoleTabToggle = new QAction(tr("Toggle &Chat/Activity Console"), this);
+	qaConsoleTabToggle->setShortcut(QKeySequence(tr("Ctrl+Shift+L")));
+	qaConsoleTabToggle->setToolTip(tr("Switch between the chat messages and the activity log"));
+	connect(qaConsoleTabToggle, &QAction::triggered, this, &MainWindow::toggleConsoleTab);
+	qmConfig->addAction(qaConsoleTabToggle);
+
 	delete qdwChat;
 	delete qdwMinimalViewNote;
-	qdwLog             = nullptr;
 	qdwChat            = nullptr;
 	qdwMinimalViewNote = nullptr;
 
@@ -715,13 +754,96 @@ void MainWindow::updateWindowTitle() {
 	setWindowTitle(title);
 }
 
+void MainWindow::appendConsoleEntry(Log::MsgType mt, const QString &console, bool ownMessage, const QDateTime &dt) {
+	// The routing decision itself: exactly the two text-message types are
+	// chat, everything else (including PluginMessage, outside the legacy
+	// enum-range arithmetic) is activity.
+	LogConsoleView *destination = LogConsoleView::isChatMessageType(mt) ? m_chatConsole : m_activityConsole;
+	if (!destination) {
+		return;
+	}
+
+	// Entries that arrive while their destination is hidden feed the unread
+	// badge of that destination's tab (activity additionally latches a
+	// warning state for unseen Warning/CriticalError entries).
+	if (!destination->isVisible()) {
+		if (destination == m_chatConsole) {
+			++m_chatUnread;
+		} else {
+			++m_activityUnread;
+			if (mt == Log::Warning || mt == Log::CriticalError) {
+				m_activityUnseenWarning = true;
+			}
+		}
+		updateConsoleBadges();
+	}
+
+	// The per-entry presentation settings are snapshotted here so one entry
+	// renders consistently even if the setting changes mid-render.
+	destination->appendEntry(dt, console, ownMessage,
+							 { Global::get().s.iChatMessageMargins, Global::get().s.bLog24HourClock });
+}
+
 bool MainWindow::isConsoleEntryVisible(Log::MsgType mt) const {
-	Q_UNUSED(mt);
-	// The combined log widget inside the redesigned shell is the only console
-	// destination. The shell's query reflects the actual widget visibility, so
-	// minimal mode and hidden ancestors are reported correctly. Stage 5 routes
-	// per message type through this same query.
-	return isActiveWindow() && m_shell && m_shell->isConsoleVisible();
+	// Visibility is answered for the entry's routed destination only, from
+	// real widget visibility (the stacked pair hides the inactive tab's view;
+	// minimal mode hides the whole panel; hidden ancestors stay hidden): a
+	// chat entry is never "visible" merely because the activity view is on
+	// screen, and vice versa. Gates highlight/balloon only.
+	const LogConsoleView *destination = LogConsoleView::isChatMessageType(mt) ? m_chatConsole : m_activityConsole;
+	return destination && isActiveWindow() && destination->isVisible();
+}
+
+void MainWindow::setConsoleStyleSheet(const QString &sheet) {
+	if (m_chatConsole) {
+		m_chatConsole->applyTheme(sheet);
+	}
+	if (m_activityConsole) {
+		m_activityConsole->applyTheme(sheet);
+	}
+}
+
+void MainWindow::applyConsoleBlockLimit() {
+	const int limit = Global::get().s.iMaxLogBlocks;
+	if (m_chatConsole) {
+		m_chatConsole->setLogBlockLimit(limit);
+	}
+	if (m_activityConsole) {
+		m_activityConsole->setLogBlockLimit(limit);
+	}
+}
+
+void MainWindow::updateConsoleBadges() {
+	if (!m_shell) {
+		return;
+	}
+	ChatPanel *panel = m_shell->chatPanel();
+	panel->setChatBadge(m_chatUnread);
+	panel->setActivityBadge(m_activityUnread, m_activityUnseenWarning);
+}
+
+void MainWindow::toggleConsoleTab() {
+	if (!m_shell) {
+		return;
+	}
+	ChatPanel *panel = m_shell->chatPanel();
+	panel->setActiveConsole(panel->activityTabActive() ? m_chatConsole : m_activityConsole);
+}
+
+bool MainWindow::eventFilter(QObject *watched, QEvent *event) {
+	// The unread badge of a destination clears when its view is actually
+	// shown: tab switch, return from minimal mode, window un-hide.
+	if (event->type() == QEvent::Show) {
+		if (watched == m_chatConsole) {
+			m_chatUnread = 0;
+			updateConsoleBadges();
+		} else if (watched == m_activityConsole) {
+			m_activityUnread        = 0;
+			m_activityUnseenWarning = false;
+			updateConsoleBadges();
+		}
+	}
+	return QMainWindow::eventFilter(watched, event);
 }
 
 bool MainWindow::isMinimalView() const {
@@ -746,6 +868,14 @@ void MainWindow::updateFavoriteButton() {
 }
 
 MainWindow::~MainWindow() {
+	// Detach the console sink before ANY member dies: Log outlives the window
+	// (it is deleted later in main), so a queued or direct log delivery during
+	// destruction must never reach the half-dead window - Log's null-sink
+	// guard drops such entries instead of dereferencing it.
+	if (Global::get().l) {
+		Global::get().l->setConsoleSink(nullptr);
+	}
+
 	delete qwPTTButtonWidget;
 	delete pmModel;
 	// The shell owns the presentation containers; the adopted content widgets
@@ -910,8 +1040,8 @@ void MainWindow::keyPressEvent(QKeyEvent *e) {
 /// switches between major elements of an application.
 /// This behavior is for example seen in Windows's (File) Explorer.
 ///
-/// The main widgets are qteLog (the log view), qteChat (chat input bar)
-/// and qtvUsers (users tree view).
+/// The main widgets are the active console view (chat or activity), qteChat
+/// (chat input bar) and qtvUsers (users tree view).
 void MainWindow::focusNextMainWidget() {
 	// The cycle - including the safe handling of focus held anywhere else
 	// (e.g. inside the persistent voice bar) and the skipping of areas that
@@ -1109,10 +1239,6 @@ void MainWindow::on_qtvUsers_customContextMenuRequested(const QPoint &mpos, bool
 		}
 	}
 	qpContextPosition = QPoint();
-}
-
-void MainWindow::on_qteLog_customContextMenuRequested(const QPoint &mpos) {
-	displayLogContextMenu(qteLog, mpos);
 }
 
 void MainWindow::displayLogContextMenu(LogTextBrowser *source, const QPoint &mpos) {
@@ -1590,6 +1716,13 @@ void MainWindow::storeState(const bool minimalView) {
 	}
 
 	m_uiStatePersistence->captureGeometry(minimalView, m_shell ? m_shell->splitterSizes() : QList< int >());
+	// The active console tab is part of the layout state, but only as seen in
+	// normal mode: while minimal the panel is hidden, so the stored value
+	// keeps naming the tab the user last saw (and deliberately switching tabs
+	// in minimal mode is not a normal-mode layout change).
+	if (!minimalView && m_shell) {
+		m_uiStatePersistence->setActiveTabIsActivity(m_shell->chatPanel()->activityTabActive());
+	}
 	m_uiStatePersistence->save();
 }
 
@@ -2987,6 +3120,10 @@ void MainWindow::resetUiStateLayout() {
 	// the current width and the pane minimums.
 	m_shell->setSplitterSizes(QList< int >() << 240 << 720);
 
+	// The default console tab (Chat) - the sidecar was just reset, so the
+	// presentation follows.
+	m_shell->chatPanel()->setActiveConsole(m_chatConsole);
+
 	setupView(false);
 
 	// Apply size AND position last: because the window itself now carries the
@@ -4152,11 +4289,6 @@ void MainWindow::customEvent(QEvent *evt) {
 #undef PROCESS_MUMBLE_TCP_MESSAGE
 }
 
-
-void MainWindow::on_qteLog_anchorClicked(const QUrl &url) {
-	handleLogLinkActivated(url);
-}
-
 void MainWindow::handleLogLinkActivated(const QUrl &url) {
 	if (!handleSpecialContextMenu(url, QCursor::pos(), true)) {
 #if defined(Q_OS_MAC) && defined(USE_OVERLAY)
@@ -4171,10 +4303,6 @@ void MainWindow::handleLogLinkActivated(const QUrl &url) {
 		if (url.scheme() != QLatin1String("file") && url.scheme() != QLatin1String("qrc") && !url.isRelative())
 			QDesktopServices::openUrl(url);
 	}
-}
-
-void MainWindow::on_qteLog_highlighted(const QUrl &url) {
-	handleLogLinkHighlighted(qteLog, url);
 }
 
 void MainWindow::handleLogLinkHighlighted(LogTextBrowser *source, const QUrl &url) {

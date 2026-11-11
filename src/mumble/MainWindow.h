@@ -52,6 +52,7 @@ class MenuLabel;
 class ListenerVolumeSlider;
 class UserLocalVolumeSlider;
 class ConnectionHeader;
+class LogConsoleView;
 class MainWindowShell;
 class VoiceControlBar;
 class UiStatePersistence;
@@ -75,7 +76,7 @@ public:
 	OpenURLEvent(QUrl url);
 };
 
-class MainWindow : public QMainWindow, public Ui::MainWindow {
+class MainWindow : public QMainWindow, public Ui::MainWindow, public ConsoleSink {
 	friend class UserModel;
 
 private:
@@ -122,10 +123,29 @@ public:
 	GlobalShortcut *gsAdaptivePush;
 
 	/// The redesigned central-widget shell owning the presentation layout.
-	/// The dock members qdwLog/qdwChat/qdwMinimalViewNote are deleted during
-	/// setupGui and their pointers are nulled; only the adopted content
-	/// widgets (qtvUsers, qteLog, qteChat) keep living inside the shell.
+	/// The dock members qdwChat/qdwMinimalViewNote are deleted during setupGui
+	/// and their pointers are nulled; only the adopted content widgets
+	/// (qtvUsers, qteChat and the two console views below) keep living inside
+	/// the shell.
 	MainWindowShell *m_shell = nullptr;
+
+	/// The two console destinations, code-created during setupGui (the legacy
+	/// combined log dock is gone from the .ui). Chat messages render into
+	/// m_chatConsole, everything else into m_activityConsole; MainWindow is
+	/// Log's ConsoleSink and does the routing in appendConsoleEntry(). Owned
+	/// through the shell after adoption.
+	LogConsoleView *m_chatConsole     = nullptr;
+	LogConsoleView *m_activityConsole = nullptr;
+
+	/// Unread bookkeeping for the tab badges: entries appended while their
+	/// destination view was not visible. Cleared on the view's actual Show
+	/// event (see eventFilter). The activity side additionally remembers
+	/// whether unseen entries include Warning/CriticalError (warning-state
+	/// badge). Commit 5 derives the chat side from the stream store's seen
+	/// flags instead; until then this counter is the chat badge's source.
+	int m_chatUnread             = 0;
+	int m_activityUnread         = 0;
+	bool m_activityUnseenWarning = false;
 
 	/// Connection status strip inside the shell's header container (normal
 	/// mode only). Created during setupGui; owned through the shell.
@@ -185,13 +205,34 @@ public:
 	void focusNextMainWidget();
 	QPair< QByteArray, QImage > openImageFile();
 
-	/// Whether a console entry of the given type is currently visible to the
-	/// user. This is the single presentation boundary used by Log to decide
-	/// notification suppression: the active main window plus the visibility of
-	/// the destination the entry would be appended to. The message type is not
-	/// consulted yet (the combined log is the only destination); Stage 5 routes
-	/// per type through this same query.
-	bool isConsoleEntryVisible(Log::MsgType mt) const;
+	/// ConsoleSink: renders one accepted console entry into its routed
+	/// destination (chat messages vs. everything else) and tracks the unread
+	/// badge state for entries that arrive while their destination is hidden.
+	void appendConsoleEntry(Log::MsgType mt, const QString &console, bool ownMessage,
+							const QDateTime &dt) Q_DECL_OVERRIDE;
+
+	/// ConsoleSink: whether a console entry of the given type is currently
+	/// visible to the user. This is the single presentation boundary used by
+	/// Log to decide notification suppression: the active main window plus the
+	/// visibility of the entry's routed destination only - a chat entry is
+	/// never "visible" merely because the activity view is on screen, and
+	/// vice versa. Never gates sound or TTS.
+	bool isConsoleEntryVisible(Log::MsgType mt) const Q_DECL_OVERRIDE;
+
+	/// Pushes the current theme style sheet into every console document
+	/// (Themes::apply and setupGui call this; the old direct
+	/// document()->setDefaultStyleSheet() call sites are gone).
+	void setConsoleStyleSheet(const QString &sheet);
+
+	/// Pushes the configured block limit into every console document
+	/// (setupGui and LogConfig::accept call this).
+	void applyConsoleBlockLimit();
+
+	/// Refreshes the tab badges from the unread bookkeeping.
+	void updateConsoleBadges();
+
+	/// Ctrl+Shift+L: switches the active console tab.
+	void toggleConsoleTab();
 
 	/// Current minimal-view mode of the fork's window presentation. This is the
 	/// single source of truth for code outside MainWindow (e.g. the overlay);
@@ -313,6 +354,10 @@ protected:
 	void showEvent(QShowEvent *e) Q_DECL_OVERRIDE;
 	void changeEvent(QEvent *e) Q_DECL_OVERRIDE;
 	void keyPressEvent(QKeyEvent *e) Q_DECL_OVERRIDE;
+	/// Watches the console views for actual Show events: a destination that
+	/// comes on screen has its unread badge (and the activity warning state)
+	/// cleared - the entries are visible now.
+	bool eventFilter(QObject *watched, QEvent *event) Q_DECL_OVERRIDE;
 
 	QMenu *createPopupMenu() Q_DECL_OVERRIDE;
 
@@ -398,9 +443,6 @@ public slots:
 	void on_qteChat_backtabPressed();
 	void on_qteChat_ctrlSpacePressed();
 	void on_qtvUsers_customContextMenuRequested(const QPoint &mpos, bool usePositionForGettingContext = true);
-	void on_qteLog_customContextMenuRequested(const QPoint &pos);
-	void on_qteLog_anchorClicked(const QUrl &);
-	void on_qteLog_highlighted(const QUrl &link);
 	void on_PushToTalk_triggered(bool, QVariant);
 	void on_PushToMute_triggered(bool, QVariant);
 	void on_VolumeUp_triggered(bool, QVariant);

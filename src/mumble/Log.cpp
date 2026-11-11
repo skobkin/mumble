@@ -314,7 +314,9 @@ void LogConfig::accept() const {
 #ifndef USE_NO_TTS
 	Global::get().l->tts->setVolume(s.iTTSVolume);
 #endif
-	Global::get().mw->qteLog->setLogBlockLimit(s.iMaxLogBlocks);
+	// Forwarded through the window so every console destination gets the new
+	// limit (the window is the sink; Log itself holds no widgets).
+	Global::get().mw->applyConsoleBlockLimit();
 }
 
 void LogConfig::on_qtwMessages_itemChanged(QTreeWidgetItem *i, int column) {
@@ -722,6 +724,10 @@ QString Log::validHtml(const QString &html, QTextCursor *tc) {
 	}
 }
 
+void Log::setConsoleSink(ConsoleSink *sink) {
+	m_consoleSink = sink;
+}
+
 void Log::log(MsgType mt, const QString &console, const QString &terse, bool ownMessage, const QString &overrideTTS,
 			  bool ignoreTTS) {
 	if (QThread::currentThread() != thread()) {
@@ -742,6 +748,16 @@ void Log::log(MsgType mt, const QString &console, const QString &terse, bool own
 		return;
 	}
 
+	// No sink attached. The only reachable window is between the MainWindow's
+	// destruction (the sink detaches as its destructor's first statement) and
+	// Log's own destruction at process exit: no event delivery can happen
+	// there (the last event pump ran before the window was deleted), and this
+	// guard keeps any direct same-thread call from dereferencing a dying
+	// window. Entries are dropped.
+	if (!m_consoleSink) {
+		return;
+	}
+
 	QString plain = QTextDocumentFragment::fromHtml(console).toPlainText();
 
 	quint32 flags = Global::get().s.qmMessages.value(mt);
@@ -753,15 +769,15 @@ void Log::log(MsgType mt, const QString &console, const QString &terse, bool own
 		// read the normalized text.
 		plain.replace(QLatin1String("\r\n"), QLatin1String("\n")).replace(QLatin1String("\r"), QLatin1String("\n"));
 
-		// The rendering itself (frames, date separators, timestamp, validation,
-		// scroll preservation) lives in the destination view; the per-entry
-		// settings are snapshotted here so one entry renders consistently.
-		Global::get().mw->qteLog->appendEntry(dt, console, ownMessage,
-											  { Global::get().s.iChatMessageMargins, Global::get().s.bLog24HourClock });
+		// Routing (chat vs. activity destination) and rendering (frames, date
+		// separators, timestamp, validation, scroll preservation) live on the
+		// sink side; the per-entry settings are snapshotted there so one entry
+		// renders consistently.
+		m_consoleSink->appendConsoleEntry(mt, console, ownMessage, dt);
 	}
 
 	if (!ownMessage) {
-		if (!Global::get().mw->isConsoleEntryVisible(mt)) {
+		if (!m_consoleSink->isConsoleEntryVisible(mt)) {
 			// Message notification with window highlight
 			if (flags & Settings::LogHighlight) {
 				emit highlightSpawned();

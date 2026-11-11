@@ -3,15 +3,21 @@
 // that can be found in the LICENSE file at the root of the Mumble
 // source tree or at <https://www.mumble.info/LICENSE>.
 
-// Presentation tests of the log console rendering (Stage 5 of the new UI).
-// LogConsoleView is the reusable entry renderer extracted from Log::log()'s
-// former inline insertion block; these tests pin its rendering parity
-// without constructing MainWindow or Global: the widget is Global-free by
-// design and takes all per-entry settings through RenderSettings.
+// Presentation tests of the log console rendering and routing (Stage 5 of
+// the new UI). Two families live here: the renderer tests pin LogConsoleView
+// (the entry renderer extracted from Log::log()'s former inline insertion
+// block) without constructing MainWindow or Global - the widget is
+// Global-free by design and takes all per-entry settings through
+// RenderSettings; the routing/policy tests drive a real Log through the
+// ConsoleSink seam under a temporary-directory Global, observing the Log side
+// of the contract with a recording sink (never a window, never TTS or sound:
+// the per-type flags are set to console-only unless a slot tests the
+// notification paths explicitly).
 
 #include <QtTest>
 
 #include "Log.h"
+#include "Settings.h"
 #include "widgets/LogConsoleView.h"
 #include "Global.h"
 
@@ -20,11 +26,64 @@
 #include <QImage>
 #include <QRegularExpression>
 #include <QScrollBar>
+#include <QSignalSpy>
+#include <QTemporaryDir>
 #include <QTextBlock>
 #include <QTextCursor>
 #include <QTextDocument>
 #include <QTextFragment>
 #include <QTextFrame>
+
+/// The ConsoleSink contract, recorded. Pins what Log hands across the seam:
+/// the ORIGINAL console HTML (not a plain-text projection), the ownMessage
+/// flag, the arrival timestamp, and per-entry visibility queries.
+class RecordingSink : public ConsoleSink {
+public:
+	struct Entry {
+		Log::MsgType mt;
+		QString console;
+		bool ownMessage;
+		QDateTime dt;
+	};
+
+	QVector< Entry > entries;
+	/// Number of isConsoleEntryVisible() consultations (const method, so
+	/// the counter is mutable).
+	mutable int visibilityQueries = 0;
+	/// What isConsoleEntryVisible() answers.
+	bool visible = true;
+
+	void appendConsoleEntry(Log::MsgType mt, const QString &console, bool ownMessage, const QDateTime &dt) override {
+		entries.append({ mt, console, ownMessage, dt });
+	}
+
+	bool isConsoleEntryVisible(Log::MsgType) const override {
+		++visibilityQueries;
+		return visible;
+	}
+};
+
+/// A real Global over a throwaway base path, assigned to
+/// Global::g_global_struct for the duration of one test (main.cpp assigns the
+/// pointer manually - the Global constructor never touches it). Global::l
+/// stays null: Log instances in these tests are driven directly, so
+/// logOrDefer() keeps deferring the way it does before startup finishes.
+class GlobalFixture {
+public:
+	GlobalFixture() {
+		m_dir                   = new QTemporaryDir;
+		Global::g_global_struct = new Global(m_dir->filePath(QStringLiteral("mumble.ini")));
+	}
+
+	~GlobalFixture() {
+		delete Global::g_global_struct;
+		Global::g_global_struct = nullptr;
+		delete m_dir;
+	}
+
+private:
+	QTemporaryDir *m_dir = nullptr;
+};
 
 class TestLogPresentation : public QObject {
 	Q_OBJECT
@@ -71,6 +130,40 @@ private slots:
 	// Two views never share documents or content - the structural
 	// precondition for the chat/activity split.
 	void twoViewsAreIndependent();
+
+	// --- Routing and policy through the ConsoleSink seam (real Log under a
+	// temporary Global; the sink is a stub, flags are console-only unless a
+	// slot says otherwise) ---
+
+	// Every message type Log defines reaches the sink exactly once per log()
+	// call, with the original console HTML and the ownMessage flag intact.
+	// The loop deliberately covers PluginMessage, which sits OUTSIDE
+	// [firstMsgType, lastMsgType].
+	void routingMatrixEveryMsgTypeReachesSinkOnce();
+
+	// A visible destination suppresses highlight and balloon; a hidden one
+	// emits each exactly once per entry; own messages never notify. The
+	// visibility query itself happens only for received messages.
+	void sinkVisibilityGatesHighlightAndBalloon();
+
+	// Without a sink attached (the shutdown window between the MainWindow
+	// detach and Log destruction) entries are dropped, and re-registration
+	// is immediately effective.
+	void nullSinkDropsEntriesAndReregisters();
+
+	// Startup ordering as main.cpp installs it: entries deferred before the
+	// Log existed replay through the sink that was registered BEFORE
+	// processDeferredLogs() ran.
+	void deferredLogsReplayThroughRegisteredSink();
+
+	// The ignore counter consumes entries before the sink ever sees them,
+	// per message type, and lets the (counter + 1)-th through.
+	void ignoreCounterConsumesEntriesBeforeSink();
+
+	// A type without the console bit never reaches the sink's append; its
+	// notification flags still apply on their own (pre-split parity: the
+	// console bit gates rendering, never highlight/balloon).
+	void consoleDisabledTypeSkipsSinkAppend();
 
 private:
 	/// Processes events until deferred layout work settles.
@@ -321,6 +414,167 @@ void TestLogPresentation::twoViewsAreIndependent() {
 	QVERIFY(!a.document()->toPlainText().contains(QLatin1String("in b")));
 	QVERIFY(b.document()->toPlainText().contains(QLatin1String("in b")));
 	QVERIFY(!b.document()->toPlainText().contains(QLatin1String("in a")));
+}
+
+void TestLogPresentation::routingMatrixEveryMsgTypeReachesSinkOnce() {
+	GlobalFixture fixture;
+	RecordingSink sink;
+	Log log;
+	log.setConsoleSink(&sink);
+
+	// The whole declared enum, one past lastMsgType: PluginMessage (enum
+	// order's last member) is deliberately outside the [firstMsgType,
+	// lastMsgType] range that a display-order loop would have covered, and
+	// must be routed like any other type.
+	const QDateTime before = QDateTime::currentDateTime();
+	for (int mt = Log::DebugInfo; mt <= Log::PluginMessage; ++mt) {
+		const Log::MsgType type = static_cast< Log::MsgType >(mt);
+		const QString console   = QString::fromLatin1("<p>body %1</p>").arg(mt);
+		Global::get().s.qmMessages.insert(mt, Settings::LogConsole);
+
+		sink.entries.clear();
+		log.log(type, console);
+
+		QCOMPARE(sink.entries.count(), 1);
+		QCOMPARE(sink.entries.at(0).mt, type);
+		// The sink receives the original console HTML; any projection
+		// happens on the sink side.
+		QCOMPARE(sink.entries.at(0).console, console);
+		QCOMPARE(sink.entries.at(0).ownMessage, false);
+		QVERIFY(sink.entries.at(0).dt >= before);
+		QVERIFY(sink.entries.at(0).dt <= QDateTime::currentDateTime());
+	}
+}
+
+void TestLogPresentation::sinkVisibilityGatesHighlightAndBalloon() {
+	GlobalFixture fixture;
+	RecordingSink sink;
+	Log log;
+	log.setConsoleSink(&sink);
+
+	const Log::MsgType mt = Log::Warning;
+	Global::get().s.qmMessages.insert(mt, Settings::LogConsole | Settings::LogHighlight | Settings::LogBalloon);
+
+	QSignalSpy highlightSpy(&log, &Log::highlightSpawned);
+	QSignalSpy balloonSpy(&log, &Log::notificationSpawned);
+
+	// Visible destination: the entry renders, nothing notifies.
+	sink.visible = true;
+	log.log(mt, QLatin1String("<p>seen</p>"));
+	QCOMPARE(sink.entries.count(), 1);
+	QCOMPARE(highlightSpy.count(), 0);
+	QCOMPARE(balloonSpy.count(), 0);
+	QCOMPARE(sink.visibilityQueries, 1);
+
+	// Hidden destination: exactly one highlight and one balloon per entry.
+	sink.visible = false;
+	log.log(mt, QLatin1String("<p>unseen</p>"));
+	QCOMPARE(sink.entries.count(), 2);
+	QCOMPARE(highlightSpy.count(), 1);
+	QCOMPARE(balloonSpy.count(), 1);
+	QCOMPARE(sink.visibilityQueries, 2);
+	// The balloon carries the type's display name and the entry's plain
+	// text, with the warning icon for warning-severity types.
+	QCOMPARE(balloonSpy.at(0).at(0).toString(), log.msgName(mt));
+	QCOMPARE(balloonSpy.at(0).at(1).toString(), QLatin1String("unseen"));
+	QCOMPARE(balloonSpy.at(0).at(2).value< QSystemTrayIcon::MessageIcon >(), QSystemTrayIcon::Warning);
+
+	// Own messages never notify, whatever the visibility - and never even
+	// query it.
+	log.log(mt, QLatin1String("<p>own</p>"), QString(), true);
+	QCOMPARE(sink.entries.count(), 3);
+	QCOMPARE(highlightSpy.count(), 1);
+	QCOMPARE(balloonSpy.count(), 1);
+	QCOMPARE(sink.visibilityQueries, 2);
+}
+
+void TestLogPresentation::nullSinkDropsEntriesAndReregisters() {
+	GlobalFixture fixture;
+	RecordingSink sink;
+	Log log;
+	Global::get().s.qmMessages.insert(Log::Information, Settings::LogConsole);
+
+	// No sink attached: the entry is dropped without touching anything
+	// (the shutdown window between the MainWindow detach and Log's own
+	// destruction).
+	log.log(Log::Information, QLatin1String("<p>lost</p>"));
+	QCOMPARE(sink.entries.count(), 0);
+
+	// Registration is repeatable and immediately effective.
+	log.setConsoleSink(&sink);
+	log.log(Log::Information, QLatin1String("<p>found</p>"));
+	QCOMPARE(sink.entries.count(), 1);
+	QCOMPARE(sink.entries.at(0).console, QLatin1String("<p>found</p>"));
+}
+
+void TestLogPresentation::deferredLogsReplayThroughRegisteredSink() {
+	GlobalFixture fixture;
+	RecordingSink sink;
+
+	// Global::l is null in this fixture: logOrDefer defers, exactly like
+	// startup logs produced before main.cpp created the Log.
+	Log::logOrDefer(Log::ServerConnected, QLatin1String("<p>early</p>"));
+	Log::logOrDefer(Log::Information, QLatin1String("<p>boot</p>"));
+
+	// Then the Log exists, the sink is registered BEFORE the deferred logs
+	// are replayed (main.cpp's ordering), so the backlog routes through the
+	// live sink in arrival order.
+	Log log;
+	log.setConsoleSink(&sink);
+	Global::get().s.qmMessages.insert(Log::ServerConnected, Settings::LogConsole);
+	Global::get().s.qmMessages.insert(Log::Information, Settings::LogConsole);
+	log.processDeferredLogs();
+
+	QCOMPARE(sink.entries.count(), 2);
+	QCOMPARE(sink.entries.at(0).mt, Log::ServerConnected);
+	QCOMPARE(sink.entries.at(0).console, QLatin1String("<p>early</p>"));
+	QCOMPARE(sink.entries.at(1).mt, Log::Information);
+	QCOMPARE(sink.entries.at(1).console, QLatin1String("<p>boot</p>"));
+}
+
+void TestLogPresentation::ignoreCounterConsumesEntriesBeforeSink() {
+	GlobalFixture fixture;
+	RecordingSink sink;
+	Log log;
+	log.setConsoleSink(&sink);
+	Global::get().s.qmMessages.insert(Log::TextMessage, Settings::LogConsole);
+	Global::get().s.qmMessages.insert(Log::PrivateTextMessage, Settings::LogConsole);
+
+	// Two entries are consumed by the counter (2 -> 1 -> 0)...
+	log.setIgnore(Log::TextMessage, 2);
+	log.log(Log::TextMessage, QLatin1String("<p>one</p>"));
+	log.log(Log::TextMessage, QLatin1String("<p>two</p>"));
+	QCOMPARE(sink.entries.count(), 0);
+
+	// ...the counter is per message type: other types pass while it runs...
+	log.log(Log::PrivateTextMessage, QLatin1String("<p>side</p>"));
+	QCOMPARE(sink.entries.count(), 1);
+
+	// ...and once exhausted, the type's entries pass again.
+	log.log(Log::TextMessage, QLatin1String("<p>three</p>"));
+	QCOMPARE(sink.entries.count(), 2);
+	QCOMPARE(sink.entries.at(0).console, QLatin1String("<p>side</p>"));
+	QCOMPARE(sink.entries.at(1).console, QLatin1String("<p>three</p>"));
+}
+
+void TestLogPresentation::consoleDisabledTypeSkipsSinkAppend() {
+	GlobalFixture fixture;
+	RecordingSink sink;
+	Log log;
+	log.setConsoleSink(&sink);
+
+	// Console bit off, notification bits on.
+	Global::get().s.qmMessages.insert(Log::TextMessage, Settings::LogHighlight);
+	QSignalSpy highlightSpy(&log, &Log::highlightSpawned);
+
+	// Hidden destination: no append ever happens...
+	sink.visible = false;
+	log.log(Log::TextMessage, QLatin1String("<p>silent</p>"));
+	QCOMPARE(sink.entries.count(), 0);
+
+	// ...but the notification decision is independent of the console bit
+	// (pre-split parity: LogConsole gates rendering, never highlight).
+	QCOMPARE(highlightSpy.count(), 1);
 }
 
 QTEST_MAIN(TestLogPresentation)

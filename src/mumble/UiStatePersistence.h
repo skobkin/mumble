@@ -72,6 +72,11 @@ public:
 
 	void setMinimal(bool minimal);
 	void setHideFrame(bool hideFrame);
+	/// Records which console tab was active at the last normal-mode save
+	/// (layoutRevision 2). Deliberately NOT captured while minimal - the
+	/// panel is hidden there, so the stored value keeps naming the tab the
+	/// user last saw in normal mode.
+	void setActiveTabIsActivity(bool activity);
 	void setCliVeto(bool veto);
 
 	/// Default window rectangle for the layout reset: the default size,
@@ -102,7 +107,7 @@ private:
 	UiState m_state;
 	Settings &m_shared;
 	QWidget &m_window;
-	bool m_cliVeto         = false;
+	bool m_cliVeto        = false;
 	bool m_restoreBlocked = false;
 };
 

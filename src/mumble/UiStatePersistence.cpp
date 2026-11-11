@@ -39,7 +39,7 @@ UiStateStore::LoadResult UiStatePersistence::startupLoad() {
 			m_state = m_store.loadedState();
 			break;
 		case UiStateStore::LoadResult::LoadedRestoreBlocked:
-			m_state         = m_store.loadedState();
+			m_state          = m_store.loadedState();
 			m_restoreBlocked = true;
 			qWarning("UiStatePersistence: restoration blocked by the sidecar's restore latch; "
 					 "using safe defaults until the fork layout is reset");
@@ -56,9 +56,9 @@ UiStateStore::LoadResult UiStatePersistence::startupLoad() {
 			// Seed the fork's one-time display defaults from the shared
 			// values the official client last wrote (5.3); they are never
 			// written back to shared settings by the fork.
-			m_state                 = UiState{};
-			m_state.minimal         = m_shared.bMinimalView;
-			m_state.hideFrame       = m_shared.bHideFrame;
+			m_state           = UiState{};
+			m_state.minimal   = m_shared.bMinimalView;
+			m_state.hideFrame = m_shared.bHideFrame;
 			break;
 	}
 
@@ -132,7 +132,7 @@ void UiStatePersistence::captureGeometry(bool minimalPair, const QList< int > &n
 	if (minimalPair) {
 		m_state.compactGeometry = geometry;
 	} else {
-		m_state.normalGeometry       = geometry;
+		m_state.normalGeometry      = geometry;
 		m_state.normalSplitterSizes = normalSplitterSizes;
 	}
 }
@@ -148,8 +148,7 @@ UiStateStore::SaveResult UiStatePersistence::save(QString *errorString) {
 		if (m_store.quarantineExisting(&quarantineError)) {
 			result = m_store.save(m_state, &error);
 		} else {
-			qWarning("UiStatePersistence: quarantining the invalid sidecar failed (%s)",
-					 qPrintable(quarantineError));
+			qWarning("UiStatePersistence: quarantining the invalid sidecar failed (%s)", qPrintable(quarantineError));
 		}
 	}
 
@@ -171,6 +170,10 @@ void UiStatePersistence::setHideFrame(bool hideFrame) {
 	m_state.hideFrame = hideFrame;
 }
 
+void UiStatePersistence::setActiveTabIsActivity(bool activity) {
+	m_state.activeTabIsActivity = activity;
+}
+
 void UiStatePersistence::setCliVeto(bool veto) {
 	m_cliVeto = veto;
 }
@@ -185,7 +188,7 @@ QRect UiStatePersistence::defaultWindowRect() const {
 	const QRect available =
 		screen ? screen->availableGeometry() : QRect(QPoint(0, 0), defaultSize.boundedTo(QSize(800, 600)));
 
-	QSize size = defaultSize.boundedTo(available.size());
+	QSize size          = defaultSize.boundedTo(available.size());
 	const QSize minimum = m_window.minimumSizeHint();
 	if (minimum.isValid() && !minimum.isEmpty()) {
 		size = size.expandedTo(minimum);
