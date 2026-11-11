@@ -138,6 +138,7 @@ set(MUMBLE_SOURCES
 	"ConnectDialogEdit.ui"
 	"ConnectDialog.h"
 	"ConnectDialog.ui"
+	"ConsoleUnreadTracker.h"
 	"QuitBehavior.h"
 	"CustomElements.cpp"
 	"CustomElements.h"

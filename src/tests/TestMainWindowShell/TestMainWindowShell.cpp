@@ -535,6 +535,24 @@ void TestMainWindowShell::tabBadgesAndWarningState() {
 	QVERIFY(!panel->activityTabButton()->toolTip().isEmpty());
 	panel->setActivityBadge(0, false);
 	QVERIFY(panel->activityTabButton()->icon().isNull());
+
+	// Accessible names announce the badge count to screen readers (the
+	// fixed name would hide it); the warning state is exposed as an
+	// accessible description, not just an icon.
+	panel->setChatBadge(3);
+	QVERIFY(panel->chatTabButton()->accessibleName().contains(QLatin1String("Chat")));
+	QVERIFY(panel->chatTabButton()->accessibleName().contains(QLatin1String("3")));
+	QVERIFY(panel->chatTabButton()->accessibleName().contains(QLatin1String("unread")));
+	panel->setChatBadge(0);
+	QCOMPARE(panel->chatTabButton()->accessibleName(), QLatin1String("Chat"));
+
+	panel->setActivityBadge(7, true);
+	QVERIFY(panel->activityTabButton()->accessibleName().contains(QLatin1String("7")));
+	QVERIFY(panel->activityTabButton()->accessibleName().contains(QLatin1String("unread")));
+	QVERIFY(!panel->activityTabButton()->accessibleDescription().isEmpty());
+	panel->setActivityBadge(0, false);
+	QCOMPARE(panel->activityTabButton()->accessibleName(), QLatin1String("Activity"));
+	QVERIFY(panel->activityTabButton()->accessibleDescription().isEmpty());
 }
 
 void TestMainWindowShell::tabSwitchPreservesScroll() {

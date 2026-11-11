@@ -130,11 +130,16 @@ QToolButton *ChatPanel::activityTabButton() const {
 }
 
 void ChatPanel::applyBadge(QToolButton *button, const QString &baseText, int count) {
+	const QString strippedBase = strippedMnemonic(baseText);
 	if (count > 0) {
 		const QString shown = count > 99 ? QStringLiteral("99+") : QString::number(count);
 		button->setText(tr("%1 (%2)").arg(baseText, shown));
+		// The badge count is text, but the fixed accessible name would hide
+		// it from screen readers: announce the unread count explicitly.
+		button->setAccessibleName(tr("%1 (%2 unread)").arg(strippedBase, shown));
 	} else {
 		button->setText(baseText);
+		button->setAccessibleName(strippedBase);
 	}
 }
 
@@ -146,10 +151,14 @@ void ChatPanel::setActivityBadge(int count, bool warning) {
 	applyBadge(m_activityTabButton, tr("&Activity"), count);
 	if (warning) {
 		m_activityTabButton->setIcon(style()->standardIcon(QStyle::SP_MessageBoxWarning));
-		m_activityTabButton->setToolTip(tr("Unseen warnings or errors"));
+		const QString warningNote = tr("Unseen warnings or errors");
+		m_activityTabButton->setToolTip(warningNote);
+		// Expose the warning state beyond the visual icon, too.
+		m_activityTabButton->setAccessibleDescription(warningNote);
 	} else {
 		m_activityTabButton->setIcon(QIcon());
 		m_activityTabButton->setToolTip(tr("Switch between chat messages and the activity log"));
+		m_activityTabButton->setAccessibleDescription(QString());
 	}
 }
 

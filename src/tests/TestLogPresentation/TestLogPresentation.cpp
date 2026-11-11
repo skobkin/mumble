@@ -16,6 +16,7 @@
 
 #include <QtTest>
 
+#include "ConsoleUnreadTracker.h"
 #include "Log.h"
 #include "Settings.h"
 #include "widgets/LogConsoleView.h"
@@ -164,6 +165,11 @@ private slots:
 	// notification flags still apply on their own (pre-split parity: the
 	// console bit gates rendering, never highlight/balloon).
 	void consoleDisabledTypeSkipsSinkAppend();
+
+	// Unread bookkeeping only counts entries the destination document still
+	// retains: eviction (and wholesale clears) fold back into the badge
+	// count and the unseen-warning latch.
+	void unreadTrackerCountsOnlyRetainedEntries();
 
 private:
 	/// Processes events until deferred layout work settles.
@@ -575,6 +581,51 @@ void TestLogPresentation::consoleDisabledTypeSkipsSinkAppend() {
 	// ...but the notification decision is independent of the console bit
 	// (pre-split parity: LogConsole gates rendering, never highlight).
 	QCOMPARE(highlightSpy.count(), 1);
+}
+
+void TestLogPresentation::unreadTrackerCountsOnlyRetainedEntries() {
+	ConsoleUnreadTracker tracker;
+
+	// Nothing unseen: no count, no warning latch.
+	QCOMPARE(tracker.unreadCount(), 0);
+	QVERIFY(!tracker.hasUnseenWarnings());
+
+	// Entries arriving while the destination is hidden: count and warning
+	// latch grow.
+	tracker.append(Log::Information);
+	tracker.append(Log::Warning);
+	tracker.append(Log::TextMessage);
+	QCOMPARE(tracker.unreadCount(), 3);
+	QVERIFY(tracker.hasUnseenWarnings());
+
+	// An eviction that only removes entries seen before the hidden batch
+	// (the document still holds more entries than were unseen) changes
+	// nothing.
+	tracker.retainOnly(5);
+	QCOMPARE(tracker.unreadCount(), 3);
+	QVERIFY(tracker.hasUnseenWarnings());
+
+	// An eviction that eats into the batch: the oldest unseen entries -
+	// including the warning - are gone; count drops and the latch
+	// recomputes from what survives.
+	tracker.retainOnly(1);
+	QCOMPARE(tracker.unreadCount(), 1);
+	QVERIFY(!tracker.hasUnseenWarnings());
+
+	// Full eviction (or a wholesale clear): the badge cannot outlive the
+	// entries it counted.
+	tracker.retainOnly(0);
+	QCOMPARE(tracker.unreadCount(), 0);
+	QVERIFY(!tracker.hasUnseenWarnings());
+
+	// Showing the destination clears the batch; later evictions stay
+	// no-ops.
+	tracker.append(Log::CriticalError);
+	tracker.clear();
+	QCOMPARE(tracker.unreadCount(), 0);
+	QVERIFY(!tracker.hasUnseenWarnings());
+	tracker.retainOnly(0);
+	QCOMPARE(tracker.unreadCount(), 0);
 }
 
 QTEST_MAIN(TestLogPresentation)

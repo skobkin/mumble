@@ -159,8 +159,9 @@ void LogConsoleView::setLogBlockLimit(int limit) {
 }
 
 void LogConsoleView::clearConsole() {
-	LogDocument *old   = qobject_cast< LogDocument * >(document());
-	LogDocument *fresh = new LogDocument(this);
+	LogDocument *old     = qobject_cast< LogDocument * >(document());
+	const int oldEntries = old ? old->entryCount() : 0;
+	LogDocument *fresh   = new LogDocument(this);
 	if (old) {
 		fresh->setBlockBudget(old->blockBudget());
 	}
@@ -177,6 +178,13 @@ void LogConsoleView::clearConsole() {
 	// today (the former Log::qdDate survived QTextEdit::clear() with the same
 	// effect, since post-clear entries always carry the current date).
 	m_lastEntryDate = QDate::currentDate();
+
+	// A clear removes every entry, seen and unseen; report it through the
+	// same channel as eviction so owners' unread bookkeeping cannot outlive
+	// the entries it counted.
+	if (oldEntries > 0) {
+		emit entriesTrimmed(oldEntries);
+	}
 }
 
 void LogConsoleView::compact() {
@@ -241,4 +249,7 @@ void LogConsoleView::onEntriesTrimmed(int count) {
 	} else {
 		m_retainedSources.remove(0, count);
 	}
+
+	// Relay for owners (unread-badge bookkeeping); see the signal's docs.
+	emit entriesTrimmed(count);
 }

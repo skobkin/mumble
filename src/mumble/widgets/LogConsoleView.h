@@ -72,6 +72,15 @@ public:
 	/// are preserved.
 	void compact();
 
+signals:
+	/// The document lost \p count entries from its front: budget eviction
+	/// or a wholesale clear. Owners folding this into unread bookkeeping
+	/// must query the document's current entryCount() (unseen entries are
+	/// the newest ones, so how many survived is derivable). Survives
+	/// document swaps - it is re-emitted from whichever document is
+	/// current.
+	void entriesTrimmed(int count);
+
 private slots:
 	void onEntriesTrimmed(int count);
 

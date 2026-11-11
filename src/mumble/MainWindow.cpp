@@ -670,6 +670,9 @@ void MainWindow::setupGui() {
 		// Unread badges clear on the view's actual Show (tab switch, return
 		// from minimal mode): the entries are on screen now, hence seen.
 		view->installEventFilter(this);
+		// ...and they only ever count entries the document still retains:
+		// eviction (and wholesale clears) fold back into the bookkeeping.
+		connect(view, &LogConsoleView::entriesTrimmed, this, [this, view](int) { onConsoleEntriesTrimmed(view); });
 	}
 
 	// Ctrl+Shift+L toggles between the chat and activity tabs (also the
@@ -764,16 +767,13 @@ void MainWindow::appendConsoleEntry(Log::MsgType mt, const QString &console, boo
 	}
 
 	// Entries that arrive while their destination is hidden feed the unread
-	// badge of that destination's tab (activity additionally latches a
-	// warning state for unseen Warning/CriticalError entries).
+	// badge of that destination's tab (activity additionally derives a
+	// warning state from unseen Warning/CriticalError entries).
 	if (!destination->isVisible()) {
 		if (destination == m_chatConsole) {
-			++m_chatUnread;
+			m_chatUnseen.append(mt);
 		} else {
-			++m_activityUnread;
-			if (mt == Log::Warning || mt == Log::CriticalError) {
-				m_activityUnseenWarning = true;
-			}
+			m_activityUnseen.append(mt);
 		}
 		updateConsoleBadges();
 	}
@@ -818,8 +818,20 @@ void MainWindow::updateConsoleBadges() {
 		return;
 	}
 	ChatPanel *panel = m_shell->chatPanel();
-	panel->setChatBadge(m_chatUnread);
-	panel->setActivityBadge(m_activityUnread, m_activityUnseenWarning);
+	panel->setChatBadge(m_chatUnseen.unreadCount());
+	panel->setActivityBadge(m_activityUnseen.unreadCount(), m_activityUnseen.hasUnseenWarnings());
+}
+
+void MainWindow::onConsoleEntriesTrimmed(LogConsoleView *source) {
+	// The source document lost entries: budget eviction or a wholesale
+	// clear. Unseen entries are the newest ones, so how many of them
+	// survived follows from the document's current entry count; the tracker
+	// drops any surplus, which also recomputes the warning latch (it can
+	// only survive in entries that still exist).
+	if (LogDocument *doc = qobject_cast< LogDocument * >(source->document())) {
+		(source == m_chatConsole ? m_chatUnseen : m_activityUnseen).retainOnly(doc->entryCount());
+		updateConsoleBadges();
+	}
 }
 
 void MainWindow::toggleConsoleTab() {
@@ -835,11 +847,10 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event) {
 	// shown: tab switch, return from minimal mode, window un-hide.
 	if (event->type() == QEvent::Show) {
 		if (watched == m_chatConsole) {
-			m_chatUnread = 0;
+			m_chatUnseen.clear();
 			updateConsoleBadges();
 		} else if (watched == m_activityConsole) {
-			m_activityUnread        = 0;
-			m_activityUnseenWarning = false;
+			m_activityUnseen.clear();
 			updateConsoleBadges();
 		}
 	}

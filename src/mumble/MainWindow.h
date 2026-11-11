@@ -12,6 +12,7 @@
 #include <QtNetwork/QAbstractSocket>
 #include <QtWidgets/QMainWindow>
 
+#include "ConsoleUnreadTracker.h"
 #include "CustomElements.h"
 #include "Log.h"
 #include "MUComboBox.h"
@@ -139,13 +140,14 @@ public:
 
 	/// Unread bookkeeping for the tab badges: entries appended while their
 	/// destination view was not visible. Cleared on the view's actual Show
-	/// event (see eventFilter). The activity side additionally remembers
-	/// whether unseen entries include Warning/CriticalError (warning-state
-	/// badge). Commit 5 derives the chat side from the stream store's seen
-	/// flags instead; until then this counter is the chat badge's source.
-	int m_chatUnread             = 0;
-	int m_activityUnread         = 0;
-	bool m_activityUnseenWarning = false;
+	/// event (see eventFilter) and folded back onto the document's retained
+	/// entries whenever eviction or a clear removes some of them (see
+	/// onConsoleEntriesTrimmed): the badge never counts entries the
+	/// document no longer holds. Commit 5 derives the chat side from the
+	/// stream store's seen flags instead; until then this tracker is the
+	/// chat badge's source.
+	ConsoleUnreadTracker m_chatUnseen;
+	ConsoleUnreadTracker m_activityUnseen;
 
 	/// Connection status strip inside the shell's header container (normal
 	/// mode only). Created during setupGui; owned through the shell.
@@ -230,6 +232,10 @@ public:
 
 	/// Refreshes the tab badges from the unread bookkeeping.
 	void updateConsoleBadges();
+
+	/// The source document lost entries (eviction or a wholesale clear):
+	/// folds the unread bookkeeping onto what the document still retains.
+	void onConsoleEntriesTrimmed(LogConsoleView *source);
 
 	/// Ctrl+Shift+L: switches the active console tab.
 	void toggleConsoleTab();
