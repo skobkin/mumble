@@ -155,6 +155,20 @@ void LogConsoleView::applyTheme(const QString &styleSheet) {
 void LogConsoleView::setLogBlockLimit(int limit) {
 	if (LogDocument *doc = qobject_cast< LogDocument * >(document())) {
 		doc->setBlockBudget(limit);
+		// Lowering the limit evicts in bulk and can release many image
+		// resources at once - the same post-append compaction check applies
+		// (compacting from inside the eviction itself would swap the
+		// document mid-call). doc is not touched after this point: compact
+		// destroys it.
+		if (doc->compactionDue()) {
+			compact();
+		}
+	}
+}
+
+void LogConsoleView::setResourceKeyBudget(int bytes) {
+	if (LogDocument *doc = qobject_cast< LogDocument * >(document())) {
+		doc->setResourceKeyBudget(bytes);
 	}
 }
 
@@ -164,6 +178,7 @@ void LogConsoleView::clearConsole() {
 	LogDocument *fresh   = new LogDocument(this);
 	if (old) {
 		fresh->setBlockBudget(old->blockBudget());
+		fresh->setResourceKeyBudget(old->resourceKeyBudget());
 	}
 	fresh->setDefaultStyleSheet(m_appliedStyleSheet);
 
@@ -196,9 +211,10 @@ void LogConsoleView::compact() {
 	LogDocument *old = qobject_cast< LogDocument * >(document());
 	if (old) {
 		// Preserve the reader's position across the swap (ratio-clamped).
-		QScrollBar *bar   = verticalScrollBar();
-		const qreal ratio = bar->maximum() > 0 ? qreal(bar->value()) / qreal(bar->maximum()) : 1.0;
-		const int budget  = old->blockBudget();
+		QScrollBar *bar     = verticalScrollBar();
+		const qreal ratio   = bar->maximum() > 0 ? qreal(bar->value()) / qreal(bar->maximum()) : 1.0;
+		const int budget    = old->blockBudget();
+		const int keyBudget = old->resourceKeyBudget();
 		const bool leadingDateFrame =
 			!old->rootFrame()->childFrames().isEmpty()
 			&& old->rootFrame()->childFrames().constFirst()->frameFormat().intProperty(LogDocument::FrameRoleProperty)
@@ -207,6 +223,7 @@ void LogConsoleView::compact() {
 
 		LogDocument *fresh = new LogDocument(this);
 		fresh->setBlockBudget(budget);
+		fresh->setResourceKeyBudget(keyBudget);
 		fresh->setDefaultStyleSheet(m_appliedStyleSheet);
 
 		setDocument(fresh);

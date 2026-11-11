@@ -59,6 +59,10 @@ public:
 	void applyTheme(const QString &styleSheet);
 	/// Forwards the log block limit to the owned document.
 	void setLogBlockLimit(int limit);
+	/// Forwards the stale resource-key byte budget to the owned document
+	/// (tests lower this to exercise compaction cheaply; production keeps
+	/// the default).
+	void setResourceKeyBudget(int bytes);
 
 	/// Clears the console by replacing the document wholesale, so the
 	/// resource cache and all eviction bookkeeping are released with it
