@@ -471,6 +471,12 @@ void TestLogDocument::compactionAutoTriggersOnStaleKeys() {
 
 	QTextDocument *const documentBefore = view.document();
 	QVERIFY(documentBefore != nullptr);
+	// Compaction is detected by object identity, not pointer inequality:
+	// the swap churn frees the original document early, and the allocator
+	// can hand a later fresh document the very same address (observed as a
+	// full-suite-only flake). A dynamic property dies with its object, so
+	// the stamped original can never be mistaken for a replacement.
+	documentBefore->setProperty("compactionWitness", true);
 
 	// Sustained unique-image traffic: every append evicts the previous
 	// window, accumulating stale keys far beyond the budget.
@@ -482,7 +488,7 @@ void TestLogDocument::compactionAutoTriggersOnStaleKeys() {
 
 	LogDocument *doc = docOf(view);
 	// Compaction fired (the document was swapped out from under us)...
-	QVERIFY(view.document() != documentBefore);
+	QVERIFY(!view.document()->property("compactionWitness").toBool());
 	// ...often enough that stale keys never sit beyond the budget.
 	QVERIFY(!doc->compactionDue());
 	// The retained window is intact at full image size.
