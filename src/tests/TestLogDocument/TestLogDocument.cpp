@@ -67,6 +67,12 @@ private slots:
 	// identical content.
 	void compactionPreservesContent();
 	void compactionAutoTriggersOnStaleKeys();
+	// Lowering the block limit evicts in bulk; the compaction check runs
+	// for that path, too (not only after appends).
+	void compactionTriggersOnLimitReduction();
+	// A custom resource-key budget survives compactions and clears: the
+	// fresh documents inherit it instead of resetting to the default.
+	void keyBudgetSurvivesDocumentSwaps();
 
 	// clearConsole() releases everything: content, resource cache and
 	// eviction bookkeeping die with the swapped-out document.
@@ -495,6 +501,87 @@ void TestLogDocument::compactionAutoTriggersOnStaleKeys() {
 	QCOMPARE(doc->entryCount(), 2);
 	QCOMPARE(resourceImage(doc, imageUrlOf(uniqueImageHtml(29))).width(), 4);
 	QVERIFY(view.document()->toPlainText().contains(QLatin1String("uni 29")));
+}
+
+void TestLogDocument::compactionTriggersOnLimitReduction() {
+	LogConsoleView view;
+	const auto settings = LogConsoleView::RenderSettings{ 3, true };
+
+	// Measure a two-entry window first (one seed entry, then the per-entry
+	// block delta of one image entry).
+	view.appendEntry(QDateTime::currentDateTime(), QString::fromLatin1("<p>seed</p>") + uniqueImageHtml(900), false,
+					 settings);
+	const int blocksForOne = docOf(view)->totalBlockCount();
+	view.appendEntry(QDateTime::currentDateTime(), QString::fromLatin1("<p>lim 00</p>") + uniqueImageHtml(0), false,
+					 settings);
+	const int perEntry = docOf(view)->totalBlockCount() - blocksForOne;
+
+	// Appending without a block budget: nothing evicts, so no stale keys
+	// accumulate even though the key budget is tiny.
+	for (int i = 1; i < 12; ++i) {
+		view.appendEntry(QDateTime::currentDateTime(),
+						 QString::fromLatin1("<p>lim %1</p>").arg(i, 2, 10, QLatin1Char('0')) + uniqueImageHtml(i),
+						 false, settings);
+	}
+	view.setResourceKeyBudget(512);
+	QCOMPARE(docOf(view)->staleResourceKeyBytes(), 0);
+	QVERIFY(!docOf(view)->compactionDue());
+
+	QTextDocument *const documentBefore = view.document();
+
+	// Lowering the limit evicts in bulk (down to the two-entry window):
+	// the released image keys blow past the tiny budget and the view must
+	// compact immediately (not when the next message happens to arrive).
+	view.setLogBlockLimit(blocksForOne + perEntry);
+
+	LogDocument *doc = docOf(view);
+	QVERIFY(view.document() != documentBefore);
+	QCOMPARE(doc->staleResourceKeyBytes(), 0);
+	QVERIFY(!doc->compactionDue());
+	// The retained window survived the swap at full image size.
+	QCOMPARE(resourceImage(doc, imageUrlOf(uniqueImageHtml(11))).width(), 4);
+	QVERIFY(view.document()->toPlainText().contains(QLatin1String("lim 11")));
+}
+
+void TestLogDocument::keyBudgetSurvivesDocumentSwaps() {
+	LogConsoleView view;
+	const auto settings        = LogConsoleView::RenderSettings{ 3, true };
+	constexpr int customBudget = 512;
+
+	// Measure a two-entry window, then hold exactly two entries under the
+	// custom key budget.
+	view.appendEntry(QDateTime::currentDateTime(), QString::fromLatin1("<p>seed</p>") + uniqueImageHtml(900), false,
+					 settings);
+	const int blocksForOne = docOf(view)->totalBlockCount();
+	view.appendEntry(QDateTime::currentDateTime(), QString::fromLatin1("<p>uni 00</p>") + uniqueImageHtml(0), false,
+					 settings);
+	const int perEntry = docOf(view)->totalBlockCount() - blocksForOne;
+	view.setLogBlockLimit(blocksForOne + perEntry);
+	view.setResourceKeyBudget(customBudget);
+
+	// Two sustained-traffic rounds: each must compact (the swapped-out
+	// object is the observable - detected by identity, not pointer; see
+	// compactionAutoTriggersOnStaleKeys), and the custom budget must reach
+	// the fresh document every time - a reset to the default would also
+	// stop the second round from compacting at all.
+	for (int round = 0; round < 2; ++round) {
+		QTextDocument *const documentBefore = view.document();
+		documentBefore->setProperty("compactionWitness", true);
+		for (int i = 1; i < 20; ++i) {
+			view.appendEntry(QDateTime::currentDateTime(),
+							 QString::fromLatin1("<p>uni %1.%2</p>").arg(round).arg(i, 2, 10, QLatin1Char('0'))
+								 + uniqueImageHtml(round * 100 + i),
+							 false, settings);
+		}
+		QVERIFY(!view.document()->property("compactionWitness").toBool());
+		QCOMPARE(docOf(view)->resourceKeyBudget(), customBudget);
+		QVERIFY(!docOf(view)->compactionDue());
+	}
+
+	// clearConsole swaps the document as well; the budget survives it.
+	view.clearConsole();
+	QCOMPARE(docOf(view)->resourceKeyBudget(), customBudget);
+	QCOMPARE(docOf(view)->staleResourceKeyBytes(), 0);
 }
 
 void TestLogDocument::clearReleasesEverything() {
