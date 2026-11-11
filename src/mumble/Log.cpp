@@ -423,7 +423,6 @@ Log::Log(QObject *p) : QObject(p) {
 	tts->setVolume(Global::get().s.iTTSVolume);
 #endif
 	uiLastId = 0;
-	qdDate   = QDate::currentDate();
 
 	QObject::connect(this, &Log::highlightSpawned, Global::get().mw, &MainWindow::highlightWindow);
 }
@@ -642,7 +641,16 @@ QString Log::imageToImg(QImage img, int maxSize) {
 QString Log::validHtml(const QString &html, QTextCursor *tc) {
 	LogDocument qtd;
 
-	QRectF qr = Mumble::Screen::screenFromWidget(*Global::get().mw)->availableGeometry();
+	// The MainWindow is unavailable in isolated tests (and during parts of
+	// startup/shutdown); fall back to the primary screen's geometry then
+	// instead of dereferencing a null pointer.
+	QRectF qr;
+	if (Global::g_global_struct && Global::get().mw) {
+		qr = Mumble::Screen::screenFromWidget(*Global::get().mw)->availableGeometry();
+	} else {
+		const QScreen *primary = qApp->primaryScreen();
+		qr                     = primary ? primary->availableGeometry() : QRectF(0, 0, 800, 600);
+	}
 	qtd.setTextWidth(qr.width() / 2);
 	qtd.setDefaultStyleSheet(qApp->styleSheet());
 
@@ -740,81 +748,16 @@ void Log::log(MsgType mt, const QString &console, const QString &terse, bool own
 
 	// Message output on console
 	if ((flags & Settings::LogConsole)) {
-		QTextCursor tc = Global::get().mw->qteLog->textCursor();
+		// Convert CRLF to unix-style LF and old mac-style LF (single \r) to unix-style as well.
+		// Kept here, and in-place, because the balloon and TTS payloads below
+		// read the normalized text.
+		plain.replace(QLatin1String("\r\n"), QLatin1String("\n")).replace(QLatin1String("\r"), QLatin1String("\n"));
 
-		tc.movePosition(QTextCursor::End);
-
-		// We copy the value from the settings in order to make sure that
-		// we use the same margin everywhere while in this method (even if
-		// the setting might change in that time).
-		const int msgMargin = Global::get().s.iChatMessageMargins;
-
-		QTextFrameFormat qttf;
-		qttf.setTopMargin(0);
-		qttf.setBottomMargin(msgMargin);
-
-		LogTextBrowser *tlog     = Global::get().mw->qteLog;
-		const int oldscrollvalue = tlog->getLogScroll();
-		// Restore the previous scroll position after inserting a new message
-		// if the message was not sent by the user AND the chat log is not
-		// scrolled all the way down.
-		const bool restoreScroll = !(ownMessage || tlog->isScrolledToBottom());
-
-		// A newline is inserted after each frame, but this spaces out the
-		// log entries too much, so the line height is set to zero to reduce
-		// the space between log entries. This line height is only set for the
-		// blank lines between entries, not for entries themselves.
-		//
-		// NOTE: All further log entries must go in a new text frame.
-		// Otherwise, they will not display correctly as a result of having
-		// line height equal to 0 for the current block.
-		QTextBlockFormat bf = tc.blockFormat();
-		bf.setLineHeight(0, QTextBlockFormat::FixedHeight);
-		bf.setTopMargin(0);
-		bf.setBottomMargin(0);
-
-		// Set the line height of the leading blank line to zero
-		tc.setBlockFormat(bf);
-
-		if (qdDate != dt.date()) {
-			qdDate = dt.date();
-			tc.insertFrame(qttf);
-			tc.insertHtml(
-				tr("[Date changed to %1]\n").arg(QLocale().toString(qdDate, QLocale::ShortFormat).toHtmlEscaped()));
-			tc.movePosition(QTextCursor::End);
-			tc.setBlockFormat(bf);
-		}
-
-		// Convert CRLF to unix-style LF and old mac-style LF (single \r) to unix-style as well
-		QString fixedNLPlain =
-			plain.replace(QLatin1String("\r\n"), QLatin1String("\n")).replace(QLatin1String("\r"), QLatin1String("\n"));
-
-		if (fixedNLPlain.contains(QRegularExpression(QLatin1String("\\n[ \\t]*$")))) {
-			// If the message ends with one or more blank lines (or lines only containing whitespace)
-			// paint a border around the message to make clear that it contains invisible parts.
-			// The beginning of the message is clear anyway (the date and potentially the "To XY" part)
-			// so we don't have to care about that.
-			qttf.setBorder(1);
-			qttf.setPadding(2);
-			qttf.setBorderStyle(QTextFrameFormat::BorderStyle_Dashed);
-		}
-
-		tc.insertFrame(qttf);
-
-		const QString timeString =
-			dt.time().toString(QLatin1String(Global::get().s.bLog24HourClock ? "HH:mm:ss" : "hh:mm:ss AP"));
-		tc.insertHtml(Log::msgColor(QString::fromLatin1("[%1] ").arg(timeString.toHtmlEscaped()), Log::Time));
-
-		validHtml(console, &tc);
-		tc.movePosition(QTextCursor::End);
-		Global::get().mw->qteLog->setTextCursor(tc);
-
-		// Set the line height of the trailing blank line to zero
-		tc.setBlockFormat(bf);
-
-		if (restoreScroll) {
-			tlog->setLogScroll(oldscrollvalue);
-		}
+		// The rendering itself (frames, date separators, timestamp, validation,
+		// scroll preservation) lives in the destination view; the per-entry
+		// settings are snapshotted here so one entry renders consistently.
+		Global::get().mw->qteLog->appendEntry(dt, console, ownMessage,
+											  { Global::get().s.iChatMessageMargins, Global::get().s.bLog24HourClock });
 	}
 
 	if (!ownMessage) {

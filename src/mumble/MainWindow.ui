@@ -111,7 +111,7 @@
    <attribute name="dockWidgetArea">
     <number>1</number>
    </attribute>
-   <widget class="LogTextBrowser" name="qteLog">
+   <widget class="LogConsoleView" name="qteLog">
     <property name="contextMenuPolicy">
      <enum>Qt::CustomContextMenu</enum>
     </property>
@@ -1113,9 +1113,9 @@ the channel's context menu.</string>
    <header>CustomElements.h</header>
   </customwidget>
   <customwidget>
-   <class>LogTextBrowser</class>
+   <class>LogConsoleView</class>
    <extends>QTextBrowser</extends>
-   <header>CustomElements.h</header>
+   <header>widgets/LogConsoleView.h</header>
   </customwidget>
  </customwidgets>
  <resources/>

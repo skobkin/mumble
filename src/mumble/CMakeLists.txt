@@ -315,6 +315,8 @@ set(MUMBLE_SOURCES
 	"widgets/FailedConnectionDialog.cpp"
 	"widgets/FailedConnectionDialog.h"
 	"widgets/FailedConnectionDialog.ui"
+	"widgets/LogConsoleView.cpp"
+	"widgets/LogConsoleView.h"
 	"widgets/MUComboBox.cpp"
 	"widgets/MUComboBox.h"
 	"widgets/MainWindowShell.cpp"

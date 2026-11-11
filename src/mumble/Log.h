@@ -9,7 +9,6 @@
 #include <set>
 
 #include <QSystemTrayIcon>
-#include <QtCore/QDate>
 #include <QtCore/QMutex>
 #include <QtCore/QVector>
 #include <QtGui/QTextCursor>
@@ -134,7 +133,6 @@ protected:
 	TextToSpeech *tts;
 #endif
 	unsigned int uiLastId;
-	QDate qdDate;
 	static const QStringList allowedSchemes();
 
 public:

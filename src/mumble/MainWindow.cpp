@@ -63,6 +63,7 @@
 #include "UiStateStore.h"
 #include "UserView.h"
 #include "widgets/ConnectionHeader.h"
+#include "widgets/LogConsoleView.h"
 #include "widgets/MainWindowShell.h"
 #include "widgets/VoiceControlBar.h"
 
@@ -526,11 +527,10 @@ void MainWindow::setupGui() {
 	qteLog->setFrameStyle(QFrame::NoFrame);
 #endif
 
-	LogDocument *ld = new LogDocument(qteLog);
-	qteLog->setDocument(ld);
-
-	qteLog->document()->setMaximumBlockCount(Global::get().s.iMaxLogBlocks);
-	qteLog->document()->setDefaultStyleSheet(qApp->styleSheet());
+	// The console view owns its document (see LogConsoleView); the settings
+	// derived limits are pushed through the widget's forwarders.
+	qteLog->setLogBlockLimit(Global::get().s.iMaxLogBlocks);
+	qteLog->applyTheme(qApp->styleSheet());
 
 	pmModel = new UserModel(qtvUsers);
 	qtvUsers->setModel(pmModel);
