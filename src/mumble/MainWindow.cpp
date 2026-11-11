@@ -48,24 +48,24 @@
 #include "TextMessage.h"
 #include "Themes.h"
 #include "Tokens.h"
+#include "UiStatePersistence.h"
+#include "UiStateStore.h"
 #include "User.h"
 #include "UserEdit.h"
 #include "UserInformation.h"
 #include "UserLocalNicknameDialog.h"
 #include "UserLocalVolumeSlider.h"
 #include "UserModel.h"
-#include "UiStatePersistence.h"
+#include "UserView.h"
 #include "Utils.h"
 #include "VersionCheck.h"
 #include "ViewCert.h"
 #include "VoiceRecorderDialog.h"
-#include "Global.h"
-#include "UiStateStore.h"
-#include "UserView.h"
 #include "widgets/ConnectionHeader.h"
 #include "widgets/LogConsoleView.h"
 #include "widgets/MainWindowShell.h"
 #include "widgets/VoiceControlBar.h"
+#include "Global.h"
 
 #ifdef Q_OS_WIN
 #	include "TaskList.h"
@@ -133,7 +133,9 @@ MainWindow::MainWindow(QWidget *p)
 	else
 		SvgIcon::addSvgPixmapsToIcon(qiIcon, QLatin1String("skin:mumble.svg"));
 #else
-	{ SvgIcon::addSvgPixmapsToIcon(qiIcon, QLatin1String("skin:mumble.svg")); }
+	{
+		SvgIcon::addSvgPixmapsToIcon(qiIcon, QLatin1String("skin:mumble.svg"));
+	}
 
 	// Set application icon except on MacOSX, where the window-icon
 	// shown in the title-bar usually serves as a draggable version of the
@@ -623,7 +625,7 @@ void MainWindow::setupGui() {
 	QWidget *adoptedTree = takeCentralWidget();
 	Q_ASSERT(adoptedTree == qtvUsers);
 
-	m_shell = new MainWindowShell(qtvUsers, qteLog, qteChat, this);
+	m_shell  = new MainWindowShell(qtvUsers, qteLog, qteChat, this);
 	m_header = new ConnectionHeader(qaServerConnect, qaServerDisconnect, qaServerInformation, qaSearch);
 	m_shell->setHeaderWidget(m_header);
 	// Persistent voice control strip (normal AND minimal mode). Pure
@@ -1110,22 +1112,26 @@ void MainWindow::on_qtvUsers_customContextMenuRequested(const QPoint &mpos, bool
 }
 
 void MainWindow::on_qteLog_customContextMenuRequested(const QPoint &mpos) {
-	QString link = qteLog->anchorAt(mpos);
+	displayLogContextMenu(qteLog, mpos);
+}
+
+void MainWindow::displayLogContextMenu(LogTextBrowser *source, const QPoint &mpos) {
+	QString link = source->anchorAt(mpos);
 	if (!link.isEmpty()) {
 		QUrl l(link);
 
-		if (handleSpecialContextMenu(l, qteLog->mapToGlobal(mpos)))
+		if (handleSpecialContextMenu(l, source->mapToGlobal(mpos)))
 			return;
 	}
 
 	QPoint contentPosition =
 		QPoint(QApplication::isRightToLeft()
-				   ? (qteLog->horizontalScrollBar()->maximum() - qteLog->horizontalScrollBar()->value())
-				   : qteLog->horizontalScrollBar()->value(),
-			   qteLog->verticalScrollBar()->value());
-	QMenu *menu = qteLog->createStandardContextMenu(mpos + contentPosition);
+				   ? (source->horizontalScrollBar()->maximum() - source->horizontalScrollBar()->value())
+				   : source->horizontalScrollBar()->value(),
+			   source->verticalScrollBar()->value());
+	QMenu *menu = source->createStandardContextMenu(mpos + contentPosition);
 
-	QTextCursor cursor  = qteLog->cursorForPosition(mpos);
+	QTextCursor cursor  = source->cursorForPosition(mpos);
 	QTextCharFormat fmt = cursor.charFormat();
 
 	// Work around imprecise cursor image identification
@@ -1146,13 +1152,28 @@ void MainWindow::on_qteLog_customContextMenuRequested(const QPoint &mpos) {
 		QAction *testItem = menu->addAction(tr("Open Image"));
 		connect(testItem, &QAction::triggered, this, &MainWindow::showImageDialog);
 
-		qtcSaveImageCursor = cursor;
+		// The cursor and its document are captured together: the image must
+		// later be resolved from exactly the view it was selected in, never
+		// from whichever log view happens to be at hand.
+		qtcSaveImageCursor   = cursor;
+		qpdSaveImageDocument = source->document();
 	}
 
 	menu->addSeparator();
-	menu->addAction(tr("Clear"), qteLog, SLOT(clear(void)));
-	menu->exec(qteLog->mapToGlobal(mpos));
+	menu->addAction(tr("Clear"), source, SLOT(clear(void)));
+	menu->exec(source->mapToGlobal(mpos));
 	delete menu;
+}
+
+QImage MainWindow::pendingLogImage() const {
+	if (qpdSaveImageDocument.isNull() || qtcSaveImageCursor.isNull()
+		|| !qtcSaveImageCursor.charFormat().isImageFormat()) {
+		return QImage();
+	}
+
+	const QString resName = qtcSaveImageCursor.charFormat().toImageFormat().name();
+	const QVariant res    = qpdSaveImageDocument->resource(QTextDocument::ImageResource, resName);
+	return res.value< QImage >();
 }
 
 void MainWindow::saveImageAs() {
@@ -1166,10 +1187,8 @@ void MainWindow::saveImageAs() {
 		return;
 	}
 
-	QString resName = qtcSaveImageCursor.charFormat().toImageFormat().name();
-	QVariant res    = qteLog->document()->resource(QTextDocument::ImageResource, resName);
-	QImage img      = res.value< QImage >();
-	bool ok         = img.save(fname);
+	QImage img = pendingLogImage();
+	bool ok    = img.save(fname);
 	if (!ok) {
 		// In case fname did not contain a file extension, try saving with an
 		// explicit format.
@@ -1207,7 +1226,8 @@ void MainWindow::updatePTTButtonWindow() {
 	if (Global::get().s.bShowPTTButtonWindow && Global::get().s.atTransmit == Settings::PushToTalk) {
 		if (!qwPTTButtonWidget) {
 			qwPTTButtonWidget = new PTTButtonWidget();
-			connect(qwPTTButtonWidget, SIGNAL(triggered(bool, QVariant)), SLOT(on_PushToTalk_triggered(bool, QVariant)));
+			connect(qwPTTButtonWidget, SIGNAL(triggered(bool, QVariant)),
+					SLOT(on_PushToTalk_triggered(bool, QVariant)));
 		}
 		qwPTTButtonWidget->show();
 	} else if (qwPTTButtonWidget) {
@@ -3646,7 +3666,7 @@ void MainWindow::updateConnectionHeader() {
 	// The tri-state is derived at push time from the live connection state;
 	// nothing is cached between refreshes.
 	ConnectionHeader::ConnectionState state = ConnectionHeader::ConnectionState::Disconnected;
-	std::shared_ptr< ServerHandler > sh      = Global::get().sh;
+	std::shared_ptr< ServerHandler > sh     = Global::get().sh;
 	if (Global::get().uiSession != 0) {
 		state = ConnectionHeader::ConnectionState::Synchronized;
 	} else if (sh && sh->isRunning()) {
@@ -3665,7 +3685,7 @@ void MainWindow::updateConnectionHeader() {
 		}
 	}
 
-	int users = 0;
+	int users    = 0;
 	int channels = 0;
 	if (state == ConnectionHeader::ConnectionState::Synchronized) {
 		users    = static_cast< int >(ClientUser::c_qmUsers.size());
@@ -3719,10 +3739,10 @@ void MainWindow::pushVoiceSnapshot(const Channel *newChannel) {
 		if (channel) {
 			snapshot.channelName = channel->qsName;
 		}
-		snapshot.talkState     = self->tsState;
-		snapshot.serverMuted   = self->bMute;
+		snapshot.talkState      = self->tsState;
+		snapshot.serverMuted    = self->bMute;
 		snapshot.serverDeafened = self->bDeaf;
-		snapshot.suppressed    = self->bSuppress;
+		snapshot.suppressed     = self->bSuppress;
 
 		// Self mute/deaf live on the settings (the actions are their
 		// projection); push-to-mute is transient. All three feed only the
@@ -4128,6 +4148,10 @@ void MainWindow::customEvent(QEvent *evt) {
 
 
 void MainWindow::on_qteLog_anchorClicked(const QUrl &url) {
+	handleLogLinkActivated(url);
+}
+
+void MainWindow::handleLogLinkActivated(const QUrl &url) {
 	if (!handleSpecialContextMenu(url, QCursor::pos(), true)) {
 #if defined(Q_OS_MAC) && defined(USE_OVERLAY)
 		// Clicking a link can cause the user's default browser to pop up while
@@ -4144,6 +4168,10 @@ void MainWindow::on_qteLog_anchorClicked(const QUrl &url) {
 }
 
 void MainWindow::on_qteLog_highlighted(const QUrl &url) {
+	handleLogLinkHighlighted(qteLog, url);
+}
+
+void MainWindow::handleLogLinkHighlighted(LogTextBrowser *source, const QUrl &url) {
 	if (url.scheme() == QString::fromLatin1("clientid") || url.scheme() == QString::fromLatin1("channelid"))
 		return;
 
@@ -4151,7 +4179,7 @@ void MainWindow::on_qteLog_highlighted(const QUrl &url) {
 		QToolTip::hideText();
 	else {
 		if (isActiveWindow()) {
-			QToolTip::showText(QCursor::pos(), url.toString(), qteLog, QRect());
+			QToolTip::showText(QCursor::pos(), url.toString(), source, QRect());
 		}
 	}
 }
@@ -4556,19 +4584,14 @@ void MainWindow::on_muteCuePopup_triggered() {
 }
 
 void MainWindow::showImageDialog() {
-	if (!qtcSaveImageCursor.isNull() && qtcSaveImageCursor.charFormat().isImageFormat()) {
-		QTextImageFormat imgFmt = qtcSaveImageCursor.charFormat().toImageFormat();
-		QString resName         = imgFmt.name();
-		QVariant res            = qteLog->document()->resource(QTextDocument::ImageResource, resName);
-		QImage img              = res.value< QImage >();
+	QImage img = pendingLogImage();
 
-		if (!img.isNull()) {
-			QPixmap pixmap             = QPixmap::fromImage(img);
-			ResponsiveImageDialog *dlg = new ResponsiveImageDialog(pixmap, this);
-			dlg->exec();
-			delete dlg;
-		} else {
-			QMessageBox::warning(this, tr("Error"), tr("Failed to decode image."));
-		}
+	if (!img.isNull()) {
+		QPixmap pixmap             = QPixmap::fromImage(img);
+		ResponsiveImageDialog *dlg = new ResponsiveImageDialog(pixmap, this);
+		dlg->exec();
+		delete dlg;
+	} else {
+		QMessageBox::warning(this, tr("Error"), tr("Failed to decode image."));
 	}
 }

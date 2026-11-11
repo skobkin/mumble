@@ -8,6 +8,7 @@
 
 #include <QtCore/QPointer>
 #include <QtCore/QtGlobal>
+#include <QtGui/QImage>
 #include <QtNetwork/QAbstractSocket>
 #include <QtWidgets/QMainWindow>
 
@@ -157,8 +158,12 @@ public:
 	bool restartOnQuit;
 
 	/// Contains the cursor whose position is immediately before the image to
-	/// save when activating the "Save Image As..." context menu item.
+	/// save when activating the "Save Image As..." context menu item, together
+	/// with the document of the log view the selection was made in. Both
+	/// halves are captured atomically while the context menu is built;
+	/// pendingLogImage() is the only reader.
 	QTextCursor qtcSaveImageCursor;
+	QPointer< QTextDocument > qpdSaveImageDocument;
 
 	QPointer< Channel > cContextChannel;
 	QPointer< ClientUser > cuContextUser;
@@ -467,6 +472,19 @@ public slots:
 	void onResetAudio();
 	void showRaiseWindow();
 	void on_qaFilterToggle_triggered();
+	/// Builds and executes the log context menu for the given source view
+	/// (anchor dispatch, standard menu, image actions, Clear). The source is
+	/// parameterized so every log destination gets identical interactions.
+	void displayLogContextMenu(LogTextBrowser *source, const QPoint &mpos);
+	/// Opens external links from any log view (internal clientid/channelid
+	/// anchors are dispatched by handleSpecialContextMenu instead).
+	void handleLogLinkActivated(const QUrl &url);
+	/// Shows the link tooltip anchored at the given source view.
+	void handleLogLinkHighlighted(LogTextBrowser *source, const QUrl &url);
+	/// The image currently selected for "Save Image As..."/"Open Image",
+	/// resolved from the document the selection was recorded against.
+	/// Returns a null image when the selection is stale.
+	QImage pendingLogImage() const;
 	/// Opens a save dialog for the image referenced by qtcSaveImageCursor.
 	void saveImageAs();
 	/// Returns the path to the user's image directory, optionally with a
