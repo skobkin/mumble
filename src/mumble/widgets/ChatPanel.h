@@ -25,6 +25,10 @@ class ChatPanel : public QWidget {
 	Q_OBJECT
 
 public:
+	/// The chat-stream filters (presentation mirror of
+	/// ChatStreamModel::Filter; MainWindow maps between the two).
+	enum class ChatFilter { All, SelectedChannel, Direct };
+
 	/// Adopts \p chatConsole, \p activityConsole and \p chatInput (reparenting
 	/// them into this panel). Detaching the widgets from their legacy dock
 	/// containers hides them; adoption explicitly shows them again so normal
@@ -57,15 +61,37 @@ public:
 	void setChatBadge(int count);
 	void setActivityBadge(int count, bool warning);
 
+	/// The chat filter row (visible only while the Chat tab is active).
+	/// Selecting the already-active filter is a no-op; Selected Channel is
+	/// only selectable while a channel is tracked (setSelectedChannelAvailable).
+	ChatFilter chatFilter() const;
+	void setChatFilter(ChatFilter filter);
+	/// Unread badges on the inactive filter buttons (same 99+ style; 0 hides
+	/// the counter). Screen readers get the count through the accessible
+	/// name, like the tab badges.
+	void setFilterBadge(ChatFilter filter, int count);
+	/// Whether the Selected Channel filter is available (a tracked channel
+	/// exists). Disabling never unselects it: MainWindow falls back to All
+	/// through setChatFilter before the selection can go stale.
+	void setSelectedChannelAvailable(bool available);
+	/// The filter buttons (presentation access for tests and focus wiring).
+	QToolButton *allFilterButton() const;
+	QToolButton *selectedChannelFilterButton() const;
+	QToolButton *directFilterButton() const;
+
 	/// Establishes the panel-internal keyboard chain after \p previous
-	/// (switch row -> chat view -> activity view -> composer). Views hidden by
-	/// the stack are skipped dynamically by Qt's focus traversal.
+	/// (switch row -> chat view -> activity view -> filter row -> composer).
+	/// Views and rows hidden by the stack or the tab state are skipped
+	/// dynamically by Qt's focus traversal.
 	void establishTabOrderAfter(QWidget *previous);
 
 signals:
 	/// Emitted after the active tab changed (user click or programmatic
 	/// switch). \p activityActive names the new state.
 	void consoleSwitched(bool activityActive);
+	/// Emitted after the chat filter changed (user click or programmatic
+	/// setChatFilter).
+	void chatFilterChanged(ChatPanel::ChatFilter filter);
 
 private:
 	LogConsoleView *m_chatConsole;
@@ -74,8 +100,14 @@ private:
 	QToolButton *m_chatTabButton;
 	QToolButton *m_activityTabButton;
 	QStackedWidget *m_stack;
+	QToolButton *m_allFilterButton;
+	QToolButton *m_selectedChannelFilterButton;
+	QToolButton *m_directFilterButton;
+	QWidget *m_filterRow;
 
 	void applyBadge(QToolButton *button, const QString &baseText, int count);
+
+	ChatFilter m_chatFilter = ChatFilter::All;
 };
 
 #endif // MUMBLE_WIDGETS_CHATPANEL_H_

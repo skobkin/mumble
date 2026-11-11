@@ -16,6 +16,7 @@
 #include "Channel.h"
 #include "ConnectDialog.h"
 #include "Connection.h"
+#include "ConnectionEpoch.h"
 #include "Database.h"
 #include "Log.h"
 #include "MainWindow.h"
@@ -1046,9 +1047,31 @@ void MainWindow::msgTextMessage(const MumbleProto::TextMessage &msg) {
 
 	const QString prefixMessage = target.isEmpty() ? name : tr("(%1) %2").arg(target).arg(name);
 
+	// Routing metadata travels through the log call, never around it: the
+	// target fields come from the relayed proto verbatim (never inferred
+	// from the sender's channel), and the epoch is captured here, at
+	// production time - a queued entry delivered after a reconnect must
+	// never inherit the newer connection's epoch.
+	ChatRoutingInfo routing;
+	routing.present = true;
+	routing.epoch   = ConnectionEpoch::current();
+	if (pSrc) {
+		routing.senderSession = pSrc->uiSession;
+		routing.senderName    = plainName;
+	}
+	for (int i = 0; i < msg.tree_id_size(); ++i) {
+		routing.treeIds.append(msg.tree_id(i));
+	}
+	for (int i = 0; i < msg.channel_id_size(); ++i) {
+		routing.channelIds.append(msg.channel_id(i));
+	}
+	for (int i = 0; i < msg.session_size(); ++i) {
+		routing.directSessions.append(msg.session(i));
+	}
+
 	Global::get().l->log(privateMessage ? Log::PrivateTextMessage : Log::TextMessage,
 						 tr("%1: %2").arg(prefixMessage).arg(u8(msg.message())), tr("Message from %1").arg(plainName),
-						 false, overrideTTS, pSrc ? pSrc->bLocalIgnoreTTS : false);
+						 false, overrideTTS, pSrc ? pSrc->bLocalIgnoreTTS : false, routing);
 }
 
 /// This message is being received when the server informs the client about the access control list (ACL) for

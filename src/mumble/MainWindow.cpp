@@ -16,6 +16,7 @@
 #include "Channel.h"
 #include "ConnectDialog.h"
 #include "Connection.h"
+#include "ConnectionEpoch.h"
 #include "Database.h"
 #include "DeveloperConsole.h"
 #include "Log.h"
@@ -542,6 +543,14 @@ void MainWindow::setupGui() {
 		tr("This shows all recent activity. Connecting to servers, errors and information messages all show up "
 		   "here.<br />To configure exactly which messages show up here, use the <b>Settings</b> command from the "
 		   "menu."));
+	// The chat stream store and its projection onto the chat view: the store
+	// is the single bounded buffer of every accepted chat entry (the chat
+	// document has NO block budget of its own - the store's entry cap evicts
+	// rendered entries in lockstep), the presenter owns filter state, seen
+	// flags and the store-aware Clear.
+	m_chatStream    = new ChatStreamModel(this);
+	m_chatPresenter = new ChatStreamPresenter(m_chatConsole, m_chatStream, this);
+	QObject::connect(m_chatPresenter, &ChatStreamPresenter::stateChanged, this, &MainWindow::onChatStreamStateChanged);
 	// The settings-derived limits and theme are pushed through the window's
 	// forwarders so every destination gets them.
 	applyConsoleBlockLimit();
@@ -591,6 +600,10 @@ void MainWindow::setupGui() {
 							 pushVoiceSnapshot(Channel::get(newChannelID));
 						 }
 					 });
+	// A removed channel invalidates the Selected Channel filter if it was
+	// the tracked one (fallback to All happens in the slot).
+	QObject::connect(pmModel, &UserModel::channelRemoved, this, &MainWindow::onChatChannelRemoved);
+
 	QObject::connect(pmModel, &UserModel::channelRenamed, this, [this](unsigned int channelID) {
 		ClientUser *self = ClientUser::get(Global::get().uiSession);
 		if (self && self->cChannel && self->cChannel->iId == channelID) {
@@ -671,9 +684,17 @@ void MainWindow::setupGui() {
 		// from minimal mode): the entries are on screen now, hence seen.
 		view->installEventFilter(this);
 		// ...and they only ever count entries the document still retains:
-		// eviction (and wholesale clears) fold back into the bookkeeping.
+		// eviction (and wholesale clears) fold back into the bookkeeping
+		// (activity side; the chat side lives in the stream store).
 		connect(view, &LogConsoleView::entriesTrimmed, this, [this, view](int) { onConsoleEntriesTrimmed(view); });
 	}
+	// The chat filter row drives the presenter; state changes (append,
+	// eviction, rebuild, clear, markDisplayed) refresh the store-derived
+	// badges. The initial epoch is whatever the current connection is (a
+	// reconnect refreshes it in serverConnected).
+	connect(m_shell->chatPanel(), &ChatPanel::chatFilterChanged, this, &MainWindow::onChatFilterChanged);
+	m_chatPresenter->setEpoch(ConnectionEpoch::current());
+	updateChatFilterSelection();
 
 	// Ctrl+Shift+L toggles between the chat and activity tabs (also the
 	// menu/a11y surface for the switch).
@@ -757,7 +778,8 @@ void MainWindow::updateWindowTitle() {
 	setWindowTitle(title);
 }
 
-void MainWindow::appendConsoleEntry(Log::MsgType mt, const QString &console, bool ownMessage, const QDateTime &dt) {
+void MainWindow::appendConsoleEntry(Log::MsgType mt, const QString &console, bool ownMessage, const QDateTime &dt,
+									const ChatRoutingInfo &routing) {
 	// The routing decision itself: exactly the two text-message types are
 	// chat, everything else (including PluginMessage, outside the legacy
 	// enum-range arithmetic) is activity.
@@ -766,22 +788,36 @@ void MainWindow::appendConsoleEntry(Log::MsgType mt, const QString &console, boo
 		return;
 	}
 
-	// Entries that arrive while their destination is hidden feed the unread
-	// badge of that destination's tab (activity additionally derives a
-	// warning state from unseen Warning/CriticalError entries).
-	if (!destination->isVisible()) {
-		if (destination == m_chatConsole) {
-			m_chatUnseen.append(mt);
-		} else {
-			m_activityUnseen.append(mt);
-		}
-		updateConsoleBadges();
-	}
-
 	// The per-entry presentation settings are snapshotted here so one entry
 	// renders consistently even if the setting changes mid-render.
-	destination->appendEntry(dt, console, ownMessage,
-							 { Global::get().s.iChatMessageMargins, Global::get().s.bLog24HourClock });
+	const LogConsoleView::RenderSettings renderSettings = { Global::get().s.iChatMessageMargins,
+															Global::get().s.bLog24HourClock };
+
+	if (destination == m_chatConsole) {
+		// Chat entries enter the stream store, HTML and routing metadata as
+		// ONE accepted entry (everything with a veto ran inside Log already
+		// - suppressed messages can never reappear through a filter
+		// rebuild). The presenter renders the entry iff it matches the
+		// active filter, keeps document and store in lockstep under the
+		// entry cap, and derives the chat badges from the seen flags.
+		ChatEntry entry;
+		entry.timestamp      = dt;
+		entry.consoleHtml    = console;
+		entry.ownMessage     = ownMessage;
+		entry.renderSettings = renderSettings;
+		entry.routing        = routing;
+		m_chatPresenter->appendEntry(entry, destination->isVisible());
+		return;
+	}
+
+	// Entries that arrive while the activity view is hidden feed its unread
+	// badge (including the warning state derived from unseen
+	// Warning/CriticalError entries).
+	if (!destination->isVisible()) {
+		m_activityUnseen.append(mt);
+		updateConsoleBadges();
+	}
+	destination->appendEntry(dt, console, ownMessage, renderSettings);
 }
 
 bool MainWindow::isConsoleEntryVisible(Log::MsgType mt) const {
@@ -805,11 +841,15 @@ void MainWindow::setConsoleStyleSheet(const QString &sheet) {
 
 void MainWindow::applyConsoleBlockLimit() {
 	const int limit = Global::get().s.iMaxLogBlocks;
-	if (m_chatConsole) {
-		m_chatConsole->setLogBlockLimit(limit);
-	}
+	// iMaxLogBlocks is read as a BLOCK budget for the activity document and
+	// as an ENTRY budget for the chat stream store. The chat document
+	// carries no block budget of its own: the store's cap evicts rendered
+	// entries in lockstep, so the document never outgrows the store.
 	if (m_activityConsole) {
 		m_activityConsole->setLogBlockLimit(limit);
+	}
+	if (m_chatPresenter) {
+		m_chatPresenter->setEntryCap(limit);
 	}
 }
 
@@ -818,20 +858,116 @@ void MainWindow::updateConsoleBadges() {
 		return;
 	}
 	ChatPanel *panel = m_shell->chatPanel();
-	panel->setChatBadge(m_chatUnseen.unreadCount());
 	panel->setActivityBadge(m_activityUnseen.unreadCount(), m_activityUnseen.hasUnseenWarnings());
+	if (m_chatPresenter) {
+		panel->setChatBadge(m_chatPresenter->chatTabBadge());
+		panel->setFilterBadge(ChatPanel::ChatFilter::All, m_chatPresenter->filterBadge(ChatStreamModel::Filter::All));
+		panel->setFilterBadge(ChatPanel::ChatFilter::SelectedChannel,
+							  m_chatPresenter->filterBadge(ChatStreamModel::Filter::SelectedChannel));
+		panel->setFilterBadge(ChatPanel::ChatFilter::Direct,
+							  m_chatPresenter->filterBadge(ChatStreamModel::Filter::Direct));
+		panel->setSelectedChannelAvailable(m_chatPresenter->selectedChannel() != 0);
+	}
 }
 
 void MainWindow::onConsoleEntriesTrimmed(LogConsoleView *source) {
 	// The source document lost entries: budget eviction or a wholesale
-	// clear. Unseen entries are the newest ones, so how many of them
-	// survived follows from the document's current entry count; the tracker
-	// drops any surplus, which also recomputes the warning latch (it can
-	// only survive in entries that still exist).
+	// clear. Chat views never land here with bookkeeping to fold: their
+	// rendered entries are removed in lockstep with the store (which owns
+	// the badge state), and compaction rebuilds preserve content.
+	if (source != m_activityConsole) {
+		return;
+	}
+	// Unseen entries are the newest ones, so how many of them survived
+	// follows from the document's current entry count; the tracker drops any
+	// surplus, which also recomputes the warning latch (it can only survive
+	// in entries that still exist).
 	if (LogDocument *doc = qobject_cast< LogDocument * >(source->document())) {
-		(source == m_chatConsole ? m_chatUnseen : m_activityUnseen).retainOnly(doc->entryCount());
+		m_activityUnseen.retainOnly(doc->entryCount());
 		updateConsoleBadges();
 	}
+}
+
+void MainWindow::onChatFilterChanged(ChatPanel::ChatFilter filter) {
+	if (!m_chatPresenter) {
+		return;
+	}
+	const ChatStreamModel::Filter mapped = filter == ChatPanel::ChatFilter::All ? ChatStreamModel::Filter::All
+										   : filter == ChatPanel::ChatFilter::SelectedChannel
+											   ? ChatStreamModel::Filter::SelectedChannel
+											   : ChatStreamModel::Filter::Direct;
+	m_chatPresenter->setFilter(mapped);
+	updateConsoleBadges();
+}
+
+void MainWindow::onChatStreamStateChanged() {
+	updateConsoleBadges();
+}
+
+void MainWindow::updateChatFilterSelection() {
+	if (!m_chatPresenter || !pmModel) {
+		return;
+	}
+	// Listener rows resolve to the listened channel (pmModel->getChannel,
+	// consistent with every other getChannel consumer).
+	Channel *c                   = pmModel->getChannel(qtvUsers->currentIndex());
+	const unsigned int channelId = (c && Global::get().uiSession != 0) ? c->iId : 0;
+	m_chatPresenter->setSelectedChannel(
+		channelId, [this](unsigned int rootId, unsigned int channelId) { return chatTreeCovers(rootId, channelId); });
+	updateConsoleBadges();
+}
+
+void MainWindow::onChatChannelRemoved(unsigned int channelId) {
+	// The tracked channel vanished: fall back to All (the store survives;
+	// only the id-based matching became invalid).
+	if (m_chatPresenter && m_chatPresenter->selectedChannel() == channelId) {
+		m_chatPresenter->setSelectedChannel(0, {});
+	}
+}
+
+bool MainWindow::chatTreeCovers(unsigned int rootId, unsigned int channelId) const {
+	// Plain cParent walk over the live channel objects; both lookups are
+	// nullptr-safe (channels die on disconnect while historical entries
+	// still name their ids).
+	const Channel *root    = Channel::get(rootId);
+	const Channel *channel = Channel::get(channelId);
+	if (!root || !channel) {
+		return false;
+	}
+	for (const Channel *walk = channel; walk; walk = walk->cParent) {
+		if (walk == root) {
+			return true;
+		}
+	}
+	return false;
+}
+
+ChatRoutingInfo MainWindow::chatRoutingForChannel(unsigned int channelId, bool treeScoped) const {
+	ChatRoutingInfo routing;
+	routing.present = true;
+	routing.epoch   = ConnectionEpoch::current();
+	if (const ClientUser *self = ClientUser::get(Global::get().uiSession)) {
+		routing.senderSession = self->uiSession;
+		routing.senderName    = self->qsName;
+	}
+	if (treeScoped) {
+		routing.treeIds.append(channelId);
+	} else {
+		routing.channelIds.append(channelId);
+	}
+	return routing;
+}
+
+ChatRoutingInfo MainWindow::chatRoutingForDirect(unsigned int session) const {
+	ChatRoutingInfo routing;
+	routing.present = true;
+	routing.epoch   = ConnectionEpoch::current();
+	if (const ClientUser *self = ClientUser::get(Global::get().uiSession)) {
+		routing.senderSession = self->uiSession;
+		routing.senderName    = self->qsName;
+	}
+	routing.directSessions.append(session);
+	return routing;
 }
 
 void MainWindow::toggleConsoleTab() {
@@ -844,11 +980,14 @@ void MainWindow::toggleConsoleTab() {
 
 bool MainWindow::eventFilter(QObject *watched, QEvent *event) {
 	// The unread badge of a destination clears when its view is actually
-	// shown: tab switch, return from minimal mode, window un-hide.
+	// shown: tab switch, return from minimal mode, window un-hide. On the
+	// chat side "shown" means the rendered entries are seen now (the badge
+	// is store-derived; entries hidden behind other filters stay unseen).
 	if (event->type() == QEvent::Show) {
 		if (watched == m_chatConsole) {
-			m_chatUnseen.clear();
-			updateConsoleBadges();
+			if (m_chatPresenter) {
+				m_chatPresenter->markDisplayed();
+			}
 		} else if (watched == m_activityConsole) {
 			m_activityUnseen.clear();
 			updateConsoleBadges();
@@ -1297,9 +1436,15 @@ void MainWindow::displayLogContextMenu(LogTextBrowser *source, const QPoint &mpo
 	}
 
 	menu->addSeparator();
-	// Clear routes per destination: console views release their resource
-	// cache by swapping the document wholesale (LogConsoleView::clearConsole).
-	if (LogConsoleView *console = qobject_cast< LogConsoleView * >(source)) {
+	// Clear routes per destination. The ACTIVITY console releases its
+	// resource cache by swapping the document wholesale. The CHAT console is
+	// a projection of the stream store: a bare widget clear would be undone
+	// by the next filter rebuild, so Clear goes through the presenter and
+	// removes the active filter's entries from the store itself (entries
+	// hidden behind other filters survive).
+	if (source == m_chatConsole && m_chatPresenter) {
+		menu->addAction(tr("Clear"), this, [this]() { m_chatPresenter->clearActiveFilter(); });
+	} else if (LogConsoleView *console = qobject_cast< LogConsoleView * >(source)) {
 		menu->addAction(tr("Clear"), console, &LogConsoleView::clearConsole);
 	} else {
 		menu->addAction(tr("Clear"), source, SLOT(clear(void)));
@@ -1507,6 +1652,11 @@ static void recreateServerHandler() {
 	sh = ServerHandlerPtr(new ServerHandler());
 	sh->moveToThread(sh.get());
 	Global::get().sh = sh;
+	// Every connection lifecycle starts a new epoch: channel and session ids
+	// are connection-local, so id-based chat-filter matching captured under
+	// the old connection must never apply to the new one (producers capture
+	// the epoch at production time; see ConnectionEpoch).
+	ConnectionEpoch::bump();
 	Global::get().mw->connect(sh.get(), SIGNAL(connected()), Global::get().mw, SLOT(serverConnected()));
 	Global::get().mw->connect(sh.get(), SIGNAL(disconnected(QAbstractSocket::SocketError, QString)), Global::get().mw,
 							  SLOT(serverDisconnected(QAbstractSocket::SocketError, QString)));
@@ -2338,9 +2488,9 @@ void MainWindow::openTextMessageDialog(ClientUser *p) {
 
 		if (!msg.isEmpty()) {
 			Global::get().sh->sendUserTextMessage(p->uiSession, msg);
-			Global::get().l->log(Log::TextMessage,
-								 tr("To %1: %2").arg(Log::formatClientUser(p, Log::Target), texm->message()),
-								 tr("Message to %1").arg(p->qsName), true);
+			Global::get().l->log(
+				Log::TextMessage, tr("To %1: %2").arg(Log::formatClientUser(p, Log::Target), texm->message()),
+				tr("Message to %1").arg(p->qsName), true, QString(), false, chatRoutingForDirect(p->uiSession));
 		}
 	}
 	delete texm;
@@ -2472,12 +2622,14 @@ void MainWindow::sendChatbarMessage(QString qsMessage) {
 
 		Global::get().sh->sendChannelTextMessage(c->iId, qsMessage, false);
 		Global::get().l->log(Log::TextMessage, tr("To %1: %2").arg(Log::formatChannel(c), qsMessage),
-							 tr("Message to channel %1").arg(c->qsName), true);
+							 tr("Message to channel %1").arg(c->qsName), true, QString(), false,
+							 chatRoutingForChannel(c->iId, false));
 	} else {
 		// User message
 		Global::get().sh->sendUserTextMessage(p->uiSession, qsMessage);
 		Global::get().l->log(Log::TextMessage, tr("To %1: %2").arg(Log::formatClientUser(p, Log::Target), qsMessage),
-							 tr("Message to %1").arg(p->qsName), true);
+							 tr("Message to %1").arg(p->qsName), true, QString(), false,
+							 chatRoutingForDirect(p->uiSession));
 	}
 }
 
@@ -2822,10 +2974,12 @@ void MainWindow::on_qaChannelSendMessage_triggered() {
 
 		if (texm->bTreeMessage)
 			Global::get().l->log(Log::TextMessage, tr("To %1 (Tree): %2").arg(Log::formatChannel(c), texm->message()),
-								 tr("Message to tree %1").arg(c->qsName), true);
+								 tr("Message to tree %1").arg(c->qsName), true, QString(), false,
+								 chatRoutingForChannel(id, true));
 		else
 			Global::get().l->log(Log::TextMessage, tr("To %1: %2").arg(Log::formatChannel(c), texm->message()),
-								 tr("Message to channel %1").arg(c->qsName), true);
+								 tr("Message to channel %1").arg(c->qsName), true, QString(), false,
+								 chatRoutingForChannel(id, false));
 	}
 	delete texm;
 }
@@ -3549,7 +3703,8 @@ void MainWindow::on_gsSendTextMessage_triggered(bool down, QVariant scdata) {
 	Channel *c = ClientUser::get(Global::get().uiSession)->cChannel;
 	Global::get().sh->sendChannelTextMessage(c->iId, qsText, false);
 	Global::get().l->log(Log::TextMessage, tr("To %1: %2").arg(Log::formatChannel(c), qsText),
-						 tr("Message to channel %1").arg(c->qsName), true);
+						 tr("Message to channel %1").arg(c->qsName), true, QString(), false,
+						 chatRoutingForChannel(c->iId, false));
 }
 
 void MainWindow::on_gsSendClipboardTextMessage_triggered(bool down, QVariant) {
@@ -3918,6 +4073,14 @@ void MainWindow::serverConnected() {
 	Global::get().uiSession    = 0;
 	Global::get().pPermissions = ChanACL::None;
 
+	// This lifecycle's epoch was bumped when its ServerHandler was created
+	// (recreateServerHandler); the filter side matches against it from now
+	// on. Id-based matching against the previous connection's topology is
+	// impossible by construction.
+	if (m_chatPresenter) {
+		m_chatPresenter->setEpoch(ConnectionEpoch::current());
+	}
+
 #ifdef Q_OS_MACOS
 	// Suppress AppNap while we're connected to a server.
 	MUSuppressAppNap(true);
@@ -3988,6 +4151,13 @@ void MainWindow::serverDisconnected(QAbstractSocket::SocketError err, QString re
 	qaServerBanList->setEnabled(false);
 	qtvUsers->setCurrentIndex(QModelIndex());
 	qteChat->setEnabled(false);
+	// Channel and session ids die with the connection: an active Selected
+	// Channel filter would reference a vanished channel, so it falls back to
+	// All (the store itself survives for the process lifetime - historical
+	// entries keep rendering under All/Direct with their captured names).
+	if (m_chatPresenter) {
+		m_chatPresenter->setSelectedChannel(0, {});
+	}
 
 #ifdef Q_OS_MACOS
 	// Remove App Nap suppression now that we're disconnected.
@@ -4236,6 +4406,10 @@ void MainWindow::on_qaTalkingUIToggle_triggered() {
  */
 void MainWindow::qtvUserCurrentChanged(const QModelIndex &, const QModelIndex &) {
 	updateChatBar();
+	// The Selected Channel filter tracks the live selection once active
+	// (selecting never ACTIVATES it - that would flip views under
+	// autocomplete and context-menu selections).
+	updateChatFilterSelection();
 }
 
 void MainWindow::updateChatBar() {

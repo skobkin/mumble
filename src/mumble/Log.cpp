@@ -419,6 +419,8 @@ QVector< LogMessage > Log::qvDeferredLogs;
 
 Log::Log(QObject *p) : QObject(p) {
 	qRegisterMetaType< Log::MsgType >();
+	// The queued thread-bounce below delivers routing metadata by value.
+	qRegisterMetaType< ChatRoutingInfo >();
 
 #ifndef USE_NO_TTS
 	tts = new TextToSpeech(this);
@@ -539,15 +541,15 @@ QString Log::formatChannel(::Channel *c) {
 }
 
 void Log::logOrDefer(Log::MsgType mt, const QString &console, const QString &terse, bool ownMessage,
-					 const QString &overrideTTS, bool ignoreTTS) {
+					 const QString &overrideTTS, bool ignoreTTS, const ChatRoutingInfo &routing) {
 	if (Global::get().l) {
 		// log directly as it seems the log-UI has been set-up already
-		Global::get().l->log(mt, console, terse, ownMessage, overrideTTS, ignoreTTS);
+		Global::get().l->log(mt, console, terse, ownMessage, overrideTTS, ignoreTTS, routing);
 	} else {
 		// defer the log
 		QMutexLocker mLock(&Log::qmDeferredLogs);
 
-		qvDeferredLogs.append(LogMessage(mt, console, terse, ownMessage, overrideTTS, ignoreTTS));
+		qvDeferredLogs.append(LogMessage(mt, console, terse, ownMessage, overrideTTS, ignoreTTS, routing));
 	}
 }
 
@@ -729,13 +731,16 @@ void Log::setConsoleSink(ConsoleSink *sink) {
 }
 
 void Log::log(MsgType mt, const QString &console, const QString &terse, bool ownMessage, const QString &overrideTTS,
-			  bool ignoreTTS) {
+			  bool ignoreTTS, const ChatRoutingInfo &routing) {
 	if (QThread::currentThread() != thread()) {
 		// Invoke in main thread in order to keep the Qt gods on our side by not calling any UI
-		// functions from a separate thread (can lead to program crashes)
+		// functions from a separate thread (can lead to program crashes).
+		// The metatype-registered copy of the routing info is what gets
+		// queued: the producer's locals may die before delivery.
 		QMetaObject::invokeMethod(this, "log", Qt::QueuedConnection, Q_ARG(Log::MsgType, mt),
 								  Q_ARG(const QString &, console), Q_ARG(const QString &, terse),
-								  Q_ARG(bool, ownMessage), Q_ARG(const QString &, overrideTTS), Q_ARG(bool, ignoreTTS));
+								  Q_ARG(bool, ownMessage), Q_ARG(const QString &, overrideTTS), Q_ARG(bool, ignoreTTS),
+								  Q_ARG(ChatRoutingInfo, routing));
 		return;
 	}
 
@@ -772,8 +777,11 @@ void Log::log(MsgType mt, const QString &console, const QString &terse, bool own
 		// Routing (chat vs. activity destination) and rendering (frames, date
 		// separators, timestamp, validation, scroll preservation) live on the
 		// sink side; the per-entry settings are snapshotted there so one entry
-		// renders consistently.
-		m_consoleSink->appendConsoleEntry(mt, console, ownMessage, dt);
+		// renders consistently. The routing metadata rides along: HTML and
+		// metadata enter the store on the other side as one accepted entry or
+		// not at all (everything before this line already had its chance to
+		// veto).
+		m_consoleSink->appendConsoleEntry(mt, console, ownMessage, dt, routing);
 	}
 
 	if (!ownMessage) {
@@ -923,13 +931,14 @@ void Log::processDeferredLogs() {
 	while (!qvDeferredLogs.isEmpty()) {
 		LogMessage msg = qvDeferredLogs.takeFirst();
 
-		log(msg.mt, msg.console, msg.terse, msg.ownMessage, msg.overrideTTS, msg.ignoreTTS);
+		log(msg.mt, msg.console, msg.terse, msg.ownMessage, msg.overrideTTS, msg.ignoreTTS, msg.routing);
 	}
 }
 
 LogMessage::LogMessage(Log::MsgType mt, const QString &console, const QString &terse, bool ownMessage,
-					   const QString &overrideTTS, bool ignoreTTS)
-	: mt(mt), console(console), terse(terse), ownMessage(ownMessage), overrideTTS(overrideTTS), ignoreTTS(ignoreTTS) {
+					   const QString &overrideTTS, bool ignoreTTS, const ChatRoutingInfo &routing)
+	: mt(mt), console(console), terse(terse), ownMessage(ownMessage), overrideTTS(overrideTTS), ignoreTTS(ignoreTTS),
+	  routing(routing) {
 }
 
 // ---------------------------------------------------------------------------
@@ -1091,7 +1100,15 @@ void LogDocument::enforceBlockBudget() {
 	if (m_blockBudget <= 0) {
 		return;
 	}
+	const int budget = m_blockBudget;
+	trimInternal([this, budget](int) { return totalBlockCount() > budget; });
+}
 
+int LogDocument::removeLeadingEntries(int count) {
+	return trimInternal([count](int removedSoFar) { return removedSoFar < count; });
+}
+
+int LogDocument::trimInternal(const std::function< bool(int) > &shouldTrim) {
 	int trimmedEntries = 0;
 
 	m_inInternalMutation = true;
@@ -1127,7 +1144,7 @@ void LogDocument::enforceBlockBudget() {
 		releaseUnreferencedImageResources(candidateNames);
 	};
 
-	while (totalBlockCount() > m_blockBudget) {
+	while (shouldTrim(trimmedEntries)) {
 		const QList< QTextFrame * > frames = rootFrame()->childFrames();
 
 		int messageCount = 0;
@@ -1191,6 +1208,7 @@ void LogDocument::enforceBlockBudget() {
 	if (trimmedEntries > 0) {
 		emit entriesTrimmed(trimmedEntries);
 	}
+	return trimmedEntries;
 }
 
 void LogDocument::releaseImageResource(const QUrl &name) {

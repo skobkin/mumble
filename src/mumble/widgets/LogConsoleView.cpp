@@ -270,3 +270,26 @@ void LogConsoleView::onEntriesTrimmed(int count) {
 	// Relay for owners (unread-badge bookkeeping); see the signal's docs.
 	emit entriesTrimmed(count);
 }
+
+void LogConsoleView::rebuild(const QVector< EntrySource > &sources) {
+	// clearConsole() swaps in a fresh document (carrying over both budgets
+	// and the cached theme), resets the date state and reports the loss
+	// through entriesTrimmed; the re-appends then rebuild retained sources,
+	// separators and resources deterministically from the given sources -
+	// the same rendering path a live append takes, so nothing can diverge
+	// between a rebuilt and a live-rendered document.
+	clearConsole();
+	for (const EntrySource &source : sources) {
+		appendEntry(source.timestamp, source.consoleHtml, source.ownMessage, source.settings);
+	}
+}
+
+int LogConsoleView::removeLeadingRenderedEntries(int count) {
+	if (count <= 0) {
+		return 0;
+	}
+	if (LogDocument *doc = qobject_cast< LogDocument * >(document())) {
+		return doc->removeLeadingEntries(count);
+	}
+	return 0;
+}

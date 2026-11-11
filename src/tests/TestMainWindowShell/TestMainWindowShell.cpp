@@ -24,6 +24,7 @@
 #include <QMainWindow>
 #include <QPointer>
 #include <QScrollBar>
+#include <QSignalSpy>
 #include <QSplitter>
 #include <QToolButton>
 
@@ -77,6 +78,20 @@ private slots:
 	// the counter, the activity warning state sets icon + tooltip and clears
 	// with it.
 	void tabBadgesAndWarningState();
+
+	// The chat filter row (Stage 5): part of the chat projection only -
+	// visible with the Chat tab, from construction (the initial tab) on;
+	// checkable but never autoExclusive (keyboard reachability for the
+	// whole row); wired into the keyboard chain between the consoles and
+	// the composer.
+	void chatFilterRowLifecycle();
+
+	// Filter selection semantics and badges: manual exactly-one-checked
+	// survives re-clicking the active button; Selected Channel is
+	// selectable only while available and disabling never unselects;
+	// programmatic selection while unavailable falls back to All; badges
+	// format into text and accessible names with the 99+ cap.
+	void chatFilterSelectionAndBadges();
 
 	// Tab switches swap the stacked page only: documents, content and scroll
 	// positions of both views survive arbitrarily many switches.
@@ -555,6 +570,162 @@ void TestMainWindowShell::tabBadgesAndWarningState() {
 	QVERIFY(panel->activityTabButton()->accessibleDescription().isEmpty());
 }
 
+void TestMainWindowShell::chatFilterRowLifecycle() {
+	UserView *tree              = new UserView(nullptr);
+	LogConsoleView *log         = new LogConsoleView();
+	LogConsoleView *activityLog = new LogConsoleView();
+	ChatbarTextEdit *chat       = new ChatbarTextEdit();
+
+	MainWindowShell shell(tree, log, activityLog, chat);
+	shell.resize(400, 300);
+	shell.show();
+	drainEvents();
+
+	ChatPanel *panel = shell.chatPanel();
+
+	// Chat is the initial tab, so the filter row must be part of the chat
+	// projection from construction on - a persisted-Chat restart applies no
+	// tab switch that could re-show it later.
+	QCOMPARE(panel->activeConsole(), log);
+	QVERIFY(panel->allFilterButton()->isVisible());
+	QVERIFY(panel->selectedChannelFilterButton()->isVisible());
+	QVERIFY(panel->directFilterButton()->isVisible());
+
+	// The filter row belongs to the Chat tab alone: the Activity log is a
+	// server-wide event log, not a chat projection.
+	panel->setActiveConsole(activityLog);
+	drainEvents();
+	QVERIFY(!panel->allFilterButton()->isVisible());
+	QVERIFY(!panel->selectedChannelFilterButton()->isVisible());
+	QVERIFY(!panel->directFilterButton()->isVisible());
+
+	panel->setActiveConsole(log);
+	drainEvents();
+	QVERIFY(panel->allFilterButton()->isVisible());
+	QVERIFY(panel->selectedChannelFilterButton()->isVisible());
+	QVERIFY(panel->directFilterButton()->isVisible());
+
+	// Checkable, but never autoExclusive: Qt's radio-group semantics
+	// (QAbstractButtonPrivate::fixFocusPolicy) would strip TabFocus from
+	// every sibling button, making the other filters - and the other tab -
+	// unreachable by keyboard. Exactly-one-checked is enforced manually in
+	// setActiveConsole/setChatFilter instead.
+	for (QToolButton *button : { panel->chatTabButton(), panel->activityTabButton(), panel->allFilterButton(),
+								 panel->selectedChannelFilterButton(), panel->directFilterButton() }) {
+		QVERIFY(button->isCheckable());
+		QVERIFY(!button->autoExclusive());
+		QVERIFY(button->focusPolicy() & Qt::TabFocus);
+	}
+
+	// The row is reachable in the keyboard chain between the consoles and
+	// the composer (establishTabOrderAfter wiring): a real Tab walk from
+	// the tree passes through all three filter stops on the way to the
+	// composer. (ChatbarTextEdit handles Tab itself once it HAS focus, so
+	// the walk is asserted up to landing in it.)
+	tree->setFocus();
+	drainEvents();
+	QCOMPARE(QApplication::focusWidget(), static_cast< QWidget * >(tree));
+	QTest::keyClick(tree, Qt::Key_Tab);
+	QCOMPARE(QApplication::focusWidget(), static_cast< QWidget * >(panel->chatTabButton()));
+	QTest::keyClick(panel->chatTabButton(), Qt::Key_Tab);
+	QCOMPARE(QApplication::focusWidget(), static_cast< QWidget * >(panel->activityTabButton()));
+	QTest::keyClick(panel->activityTabButton(), Qt::Key_Tab);
+	QCOMPARE(QApplication::focusWidget(), static_cast< QWidget * >(log));
+	QTest::keyClick(log, Qt::Key_Tab);
+	QCOMPARE(QApplication::focusWidget(), static_cast< QWidget * >(panel->allFilterButton()));
+	QTest::keyClick(panel->allFilterButton(), Qt::Key_Tab);
+	QCOMPARE(QApplication::focusWidget(), static_cast< QWidget * >(panel->selectedChannelFilterButton()));
+	QTest::keyClick(panel->selectedChannelFilterButton(), Qt::Key_Tab);
+	QCOMPARE(QApplication::focusWidget(), static_cast< QWidget * >(panel->directFilterButton()));
+	QTest::keyClick(panel->directFilterButton(), Qt::Key_Tab);
+	QCOMPARE(QApplication::focusWidget(), static_cast< QWidget * >(chat));
+}
+
+void TestMainWindowShell::chatFilterSelectionAndBadges() {
+	UserView *tree              = new UserView(nullptr);
+	LogConsoleView *log         = new LogConsoleView();
+	LogConsoleView *activityLog = new LogConsoleView();
+	ChatbarTextEdit *chat       = new ChatbarTextEdit();
+
+	MainWindowShell shell(tree, log, activityLog, chat);
+	shell.resize(400, 300);
+	shell.show();
+	drainEvents();
+
+	ChatPanel *panel = shell.chatPanel();
+	QSignalSpy filterSpy(panel, &ChatPanel::chatFilterChanged);
+
+	// Default All with exactly one checked button. The availability of
+	// Selected Channel is MainWindow-driven (it reflects whether a channel
+	// is tracked); start from the disconnected presentation.
+	QCOMPARE(panel->chatFilter(), ChatPanel::ChatFilter::All);
+	QVERIFY(panel->allFilterButton()->isChecked());
+	QVERIFY(!panel->selectedChannelFilterButton()->isChecked());
+	QVERIFY(!panel->directFilterButton()->isChecked());
+	QCOMPARE(filterSpy.count(), 0);
+
+	panel->setSelectedChannelAvailable(false);
+	QVERIFY(!panel->selectedChannelFilterButton()->isEnabled());
+
+	// Programmatic selection while unavailable falls back to All without a
+	// signal (the filter would match nothing).
+	panel->setChatFilter(ChatPanel::ChatFilter::SelectedChannel);
+	QCOMPARE(panel->chatFilter(), ChatPanel::ChatFilter::All);
+	QCOMPARE(filterSpy.count(), 0);
+	QVERIFY(panel->allFilterButton()->isChecked());
+
+	// Clicking Direct: signal, state, manual exactly-one-checked.
+	panel->directFilterButton()->click();
+	QCOMPARE(panel->chatFilter(), ChatPanel::ChatFilter::Direct);
+	QCOMPARE(filterSpy.count(), 1);
+	QCOMPARE(filterSpy.at(0).at(0).value< ChatPanel::ChatFilter >(), ChatPanel::ChatFilter::Direct);
+	QVERIFY(panel->directFilterButton()->isChecked());
+	QVERIFY(!panel->allFilterButton()->isChecked());
+
+	// Re-clicking (space-toggling) the active button unchecks it before
+	// the handler runs; manual exclusivity restores exactly-one-checked and
+	// the selection is unchanged (no signal).
+	panel->directFilterButton()->click();
+	QCOMPARE(panel->chatFilter(), ChatPanel::ChatFilter::Direct);
+	QVERIFY(panel->directFilterButton()->isChecked());
+	QVERIFY(!panel->allFilterButton()->isChecked());
+	QCOMPARE(filterSpy.count(), 1);
+
+	// Selecting while available works; disabling afterwards never
+	// unselects (MainWindow falls back through setChatFilter explicitly).
+	panel->setSelectedChannelAvailable(true);
+	panel->setChatFilter(ChatPanel::ChatFilter::SelectedChannel);
+	QCOMPARE(panel->chatFilter(), ChatPanel::ChatFilter::SelectedChannel);
+	QCOMPARE(filterSpy.count(), 2);
+	panel->setSelectedChannelAvailable(false);
+	QVERIFY(!panel->selectedChannelFilterButton()->isEnabled());
+	QCOMPARE(panel->chatFilter(), ChatPanel::ChatFilter::SelectedChannel);
+	QVERIFY(panel->selectedChannelFilterButton()->isChecked());
+
+	// While unavailable, programmatic selection falls back to All (one
+	// signal: the fallback IS a change).
+	panel->setChatFilter(ChatPanel::ChatFilter::SelectedChannel);
+	QCOMPARE(panel->chatFilter(), ChatPanel::ChatFilter::All);
+	QCOMPARE(filterSpy.count(), 3);
+	QCOMPARE(filterSpy.at(2).at(0).value< ChatPanel::ChatFilter >(), ChatPanel::ChatFilter::All);
+
+	// Filter badges: the count formats into the button text and the
+	// accessible name (screen readers cannot see badge text), capped at
+	// 99+, and zero hides the badge without touching the selection.
+	panel->setFilterBadge(ChatPanel::ChatFilter::Direct, 3);
+	QVERIFY(panel->directFilterButton()->text().contains(QLatin1String("(3)")));
+	QVERIFY(panel->directFilterButton()->accessibleName().contains(QLatin1String("3 unread")));
+	QCOMPARE(panel->chatFilter(), ChatPanel::ChatFilter::All);
+
+	panel->setFilterBadge(ChatPanel::ChatFilter::Direct, 150);
+	QVERIFY(panel->directFilterButton()->text().contains(QLatin1String("(99+)")));
+	QVERIFY(panel->directFilterButton()->accessibleName().contains(QLatin1String("99+")));
+
+	panel->setFilterBadge(ChatPanel::ChatFilter::Direct, 0);
+	QVERIFY(!panel->directFilterButton()->text().contains(QLatin1String("(")));
+	QVERIFY(!panel->directFilterButton()->accessibleName().contains(QLatin1String("unread")));
+}
+
 void TestMainWindowShell::tabSwitchPreservesScroll() {
 	UserView *tree              = new UserView(nullptr);
 	LogConsoleView *log         = new LogConsoleView();
@@ -618,9 +789,18 @@ void TestMainWindowShell::tabOrderTraversal() {
 	QTest::keyClick(shell.chatPanel()->activityTabButton(), Qt::Key_Tab);
 	QCOMPARE(QApplication::focusWidget(), static_cast< QWidget * >(log));
 
-	// console -> chat input (ChatbarTextEdit handles Tab itself once it HAS
-	// focus, so the chain is asserted up to landing in it)
+	// console -> filter row (visible with the Chat tab; three reachable
+	// stops because the row is never autoExclusive)
 	QTest::keyClick(log, Qt::Key_Tab);
+	QCOMPARE(QApplication::focusWidget(), static_cast< QWidget * >(shell.chatPanel()->allFilterButton()));
+	QTest::keyClick(shell.chatPanel()->allFilterButton(), Qt::Key_Tab);
+	QCOMPARE(QApplication::focusWidget(), static_cast< QWidget * >(shell.chatPanel()->selectedChannelFilterButton()));
+	QTest::keyClick(shell.chatPanel()->selectedChannelFilterButton(), Qt::Key_Tab);
+	QCOMPARE(QApplication::focusWidget(), static_cast< QWidget * >(shell.chatPanel()->directFilterButton()));
+
+	// filter row -> chat input (ChatbarTextEdit handles Tab itself once it
+	// HAS focus, so the chain is asserted up to landing in it)
+	QTest::keyClick(shell.chatPanel()->directFilterButton(), Qt::Key_Tab);
 	QCOMPARE(QApplication::focusWidget(), static_cast< QWidget * >(chat));
 }
 
@@ -683,10 +863,11 @@ void TestMainWindowShell::voiceBarPersistentAndTraversal() {
 	// input hands focus into the bar (verified with the real bar in
 	// TestVoiceControlBar::chatTabAdvancesIntoBar). The shell-side
 	// guarantees are exercised here: Backtab out of the bar's head lands in
-	// the chat input, and Tab out of the log reaches the bar whenever the
-	// chat input cannot take focus - which is exactly the disconnected
-	// presentation (setupGui disables the chat input when not connected),
-	// where the bar is the primary control surface.
+	// the chat input, and Tab out of the chat area (through the visible
+	// filter row) reaches the bar whenever the chat input cannot take focus
+	// - which is exactly the disconnected presentation (setupGui disables
+	// the chat input when not connected), where the bar is the primary
+	// control surface.
 	shell.setMinimal(false);
 	shell.resize(1000, 700);
 	drainEvents();
@@ -701,7 +882,15 @@ void TestMainWindowShell::voiceBarPersistentAndTraversal() {
 	QCOMPARE(QApplication::focusWidget(), static_cast< QWidget * >(shell.chatPanel()->activityTabButton()));
 	QTest::keyClick(shell.chatPanel()->activityTabButton(), Qt::Key_Tab);
 	QCOMPARE(QApplication::focusWidget(), static_cast< QWidget * >(log));
+	// The visible filter row intervenes between the console and the bar;
+	// the disabled chat input after it is skipped dynamically.
 	QTest::keyClick(log, Qt::Key_Tab);
+	QCOMPARE(QApplication::focusWidget(), static_cast< QWidget * >(shell.chatPanel()->allFilterButton()));
+	QTest::keyClick(shell.chatPanel()->allFilterButton(), Qt::Key_Tab);
+	QCOMPARE(QApplication::focusWidget(), static_cast< QWidget * >(shell.chatPanel()->selectedChannelFilterButton()));
+	QTest::keyClick(shell.chatPanel()->selectedChannelFilterButton(), Qt::Key_Tab);
+	QCOMPARE(QApplication::focusWidget(), static_cast< QWidget * >(shell.chatPanel()->directFilterButton()));
+	QTest::keyClick(shell.chatPanel()->directFilterButton(), Qt::Key_Tab);
 	QCOMPARE(QApplication::focusWidget(), static_cast< QWidget * >(firstButton));
 	QTest::keyClick(firstButton, Qt::Key_Tab);
 	QCOMPARE(QApplication::focusWidget(), static_cast< QWidget * >(secondButton));
@@ -710,6 +899,12 @@ void TestMainWindowShell::voiceBarPersistentAndTraversal() {
 	QTest::keyClick(secondButton, Qt::Key_Backtab);
 	QCOMPARE(QApplication::focusWidget(), static_cast< QWidget * >(firstButton));
 	QTest::keyClick(firstButton, Qt::Key_Backtab);
+	QCOMPARE(QApplication::focusWidget(), static_cast< QWidget * >(shell.chatPanel()->directFilterButton()));
+	QTest::keyClick(shell.chatPanel()->directFilterButton(), Qt::Key_Backtab);
+	QCOMPARE(QApplication::focusWidget(), static_cast< QWidget * >(shell.chatPanel()->selectedChannelFilterButton()));
+	QTest::keyClick(shell.chatPanel()->selectedChannelFilterButton(), Qt::Key_Backtab);
+	QCOMPARE(QApplication::focusWidget(), static_cast< QWidget * >(shell.chatPanel()->allFilterButton()));
+	QTest::keyClick(shell.chatPanel()->allFilterButton(), Qt::Key_Backtab);
 	QCOMPARE(QApplication::focusWidget(), static_cast< QWidget * >(log));
 	QTest::keyClick(log, Qt::Key_Backtab);
 	QCOMPARE(QApplication::focusWidget(), static_cast< QWidget * >(shell.chatPanel()->activityTabButton()));

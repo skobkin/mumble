@@ -34,10 +34,12 @@
 #include <QTextDocument>
 #include <QTextFragment>
 #include <QTextFrame>
+#include <QThread>
 
 /// The ConsoleSink contract, recorded. Pins what Log hands across the seam:
 /// the ORIGINAL console HTML (not a plain-text projection), the ownMessage
-/// flag, the arrival timestamp, and per-entry visibility queries.
+/// flag, the arrival timestamp, the producer-captured routing metadata, and
+/// per-entry visibility queries.
 class RecordingSink : public ConsoleSink {
 public:
 	struct Entry {
@@ -45,6 +47,7 @@ public:
 		QString console;
 		bool ownMessage;
 		QDateTime dt;
+		ChatRoutingInfo routing;
 	};
 
 	QVector< Entry > entries;
@@ -54,8 +57,9 @@ public:
 	/// What isConsoleEntryVisible() answers.
 	bool visible = true;
 
-	void appendConsoleEntry(Log::MsgType mt, const QString &console, bool ownMessage, const QDateTime &dt) override {
-		entries.append({ mt, console, ownMessage, dt });
+	void appendConsoleEntry(Log::MsgType mt, const QString &console, bool ownMessage, const QDateTime &dt,
+							const ChatRoutingInfo &routing) override {
+		entries.append({ mt, console, ownMessage, dt, routing });
 	}
 
 	bool isConsoleEntryVisible(Log::MsgType) const override {
@@ -173,6 +177,16 @@ private slots:
 	// notification flags still apply on their own (pre-split parity: the
 	// console bit gates rendering, never highlight/balloon).
 	void consoleDisabledTypeSkipsSinkAppend();
+
+	// Chat routing metadata rides through Log as owned value data: a
+	// same-thread log() and a deferred startup logOrDefer both deliver the
+	// producer's ChatRoutingInfo copy intact (absent for non-chat entries).
+	void routingMetadataReachesSinkAndDeferredLogs();
+
+	// The queued thread-bounce queues a metatype-registered COPY: a
+	// producer thread whose ChatRoutingInfo local dies before delivery
+	// cannot dangle - the sink receives the metadata intact.
+	void queuedDeliveryCarriesOwnedRoutingMetadata();
 
 	// Unread bookkeeping only counts entries the destination document still
 	// retains: eviction (and wholesale clears) fold back into the badge
@@ -635,6 +649,90 @@ void TestLogPresentation::consoleDisabledTypeSkipsSinkAppend() {
 	// ...but the notification decision is independent of the console bit
 	// (pre-split parity: LogConsole gates rendering, never highlight).
 	QCOMPARE(highlightSpy.count(), 1);
+}
+
+void TestLogPresentation::routingMetadataReachesSinkAndDeferredLogs() {
+	GlobalFixture fixture;
+	RecordingSink sink;
+	Log log;
+	log.setConsoleSink(&sink);
+	Global::get().s.qmMessages.insert(Log::Information, Settings::LogConsole);
+	Global::get().s.qmMessages.insert(Log::PrivateTextMessage, Settings::LogConsole);
+	Global::get().s.qmMessages.insert(Log::TextMessage, Settings::LogConsole);
+
+	// Non-chat entries carry no routing metadata at all.
+	log.log(Log::Information, QLatin1String("<p>plain</p>"));
+	QCOMPARE(sink.entries.count(), 1);
+	QVERIFY(!sink.entries.at(0).routing.present);
+
+	// A chat entry's producer-captured metadata crosses the seam intact:
+	// every field, value data end to end.
+	ChatRoutingInfo routing;
+	routing.present        = true;
+	routing.senderSession  = 42;
+	routing.senderName     = QStringLiteral("alice");
+	routing.directSessions = { 7u, 8u };
+	routing.channelIds     = { 5u, 6u };
+	routing.treeIds        = { 1u };
+	routing.epoch          = 99;
+
+	log.log(Log::PrivateTextMessage, QLatin1String("<p>direct</p>"), QString(), false, QString(), false, routing);
+	QCOMPARE(sink.entries.count(), 2);
+	const ChatRoutingInfo &delivered = sink.entries.at(1).routing;
+	QCOMPARE(delivered.present, true);
+	QCOMPARE(delivered.senderSession, 42u);
+	QCOMPARE(delivered.senderName, QStringLiteral("alice"));
+	QCOMPARE(delivered.directSessions, QVector< unsigned int >() << 7u << 8u);
+	QCOMPARE(delivered.channelIds, QVector< unsigned int >() << 5u << 6u);
+	QCOMPARE(delivered.treeIds, QVector< unsigned int >() << 1u);
+	QCOMPARE(delivered.epoch, quint64(99));
+
+	// Deferred startup logs hold their own copy: Global::l is null in this
+	// fixture, so logOrDefer queues exactly like the pre-startup logs in
+	// main.cpp.
+	Log::logOrDefer(Log::TextMessage, QLatin1String("<p>early chat</p>"), QString(), false, QString(), false, routing);
+	log.processDeferredLogs();
+	QCOMPARE(sink.entries.count(), 3);
+	QCOMPARE(sink.entries.at(2).routing.present, true);
+	QCOMPARE(sink.entries.at(2).routing.senderSession, 42u);
+	QCOMPARE(sink.entries.at(2).routing.epoch, quint64(99));
+}
+
+void TestLogPresentation::queuedDeliveryCarriesOwnedRoutingMetadata() {
+	GlobalFixture fixture;
+	RecordingSink sink;
+	Log log;
+	log.setConsoleSink(&sink);
+	Global::get().s.qmMessages.insert(Log::PrivateTextMessage, Settings::LogConsole);
+
+	// Produced on another thread: log() queues the cross-thread bounce
+	// with a metatype-registered COPY of the routing metadata. The
+	// producer's local dies with the thread before the main thread
+	// delivers - nothing in the metadata path is a pointer.
+	QThread *producer = QThread::create([&log]() {
+		ChatRoutingInfo local;
+		local.present        = true;
+		local.senderSession  = 11;
+		local.senderName     = QStringLiteral("bob");
+		local.directSessions = { 4u };
+		local.epoch          = 7;
+
+		log.log(Log::PrivateTextMessage, QLatin1String("<p>cross-thread</p>"), QString(), false, QString(), false,
+				local);
+	});
+	producer->start();
+	producer->wait();
+	delete producer;
+	drainEvents();
+
+	QCOMPARE(sink.entries.count(), 1);
+	const ChatRoutingInfo &delivered = sink.entries.at(0).routing;
+	QCOMPARE(delivered.present, true);
+	QCOMPARE(delivered.senderSession, 11u);
+	QCOMPARE(delivered.senderName, QStringLiteral("bob"));
+	QCOMPARE(delivered.directSessions, QVector< unsigned int >() << 4u);
+	QCOMPARE(delivered.epoch, quint64(7));
+	QCOMPARE(sink.entries.at(0).console, QLatin1String("<p>cross-thread</p>"));
 }
 
 void TestLogPresentation::unreadTrackerCountsOnlyRetainedEntries() {

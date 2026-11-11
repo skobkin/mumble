@@ -39,6 +39,17 @@ public:
 		bool use24HourClock;
 	};
 
+	/// One rendered entry, kept for budget-bounded compaction rebuilds.
+	/// Sources are dropped when their entry is trimmed or the console is
+	/// cleared, so the list is never larger than what the document shows.
+	/// Filter rebuilds pass these back in through rebuild().
+	struct EntrySource {
+		QDateTime timestamp;
+		QString consoleHtml;
+		bool ownMessage;
+		RenderSettings settings;
+	};
+
 	explicit LogConsoleView(QWidget *p = nullptr);
 
 	/// Whether mt belongs to a chat destination (user-to-user or channel text
@@ -75,6 +86,16 @@ public:
 	/// once stale keys exceed the resource-key budget; content and scroll
 	/// are preserved.
 	void compact();
+	/// Wholesale rebuild for filter projections: clears (fresh document, all
+	/// budgets and the theme carried over) and re-appends \p sources in
+	/// order. Date-separator state resets like a fresh view, so the first
+	/// source gets no leading separator. The view's retained-source list
+	/// becomes exactly \p sources.
+	void rebuild(const QVector< EntrySource > &sources);
+	/// Removes the \p count oldest rendered entries (whole frames + their
+	/// date separators). The store-driven chat view uses this for lockstep
+	/// eviction; returns the number of entries actually removed.
+	int removeLeadingRenderedEntries(int count);
 
 signals:
 	/// The document lost \p count entries from its front: budget eviction
@@ -89,16 +110,6 @@ private slots:
 	void onEntriesTrimmed(int count);
 
 private:
-	/// One rendered entry, kept for budget-bounded compaction rebuilds.
-	/// Sources are dropped when their entry is trimmed or the console is
-	/// cleared, so the list is never larger than what the document shows.
-	struct EntrySource {
-		QDateTime timestamp;
-		QString consoleHtml;
-		bool ownMessage;
-		RenderSettings settings;
-	};
-
 	void connectDocument(LogDocument *doc);
 
 	QVector< EntrySource > m_retainedSources;

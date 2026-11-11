@@ -12,6 +12,8 @@
 #include <QtNetwork/QAbstractSocket>
 #include <QtWidgets/QMainWindow>
 
+#include "ChatStreamModel.h"
+#include "ChatStreamPresenter.h"
 #include "ConsoleUnreadTracker.h"
 #include "CustomElements.h"
 #include "Log.h"
@@ -21,6 +23,7 @@
 #include "QtUtils.h"
 #include "Usage.h"
 #include "UserLocalNicknameDialog.h"
+#include "widgets/ChatPanel.h"
 
 #include <memory>
 #include <optional>
@@ -138,16 +141,21 @@ public:
 	LogConsoleView *m_chatConsole     = nullptr;
 	LogConsoleView *m_activityConsole = nullptr;
 
-	/// Unread bookkeeping for the tab badges: entries appended while their
-	/// destination view was not visible. Cleared on the view's actual Show
+	/// Unread bookkeeping for the ACTIVITY tab badge: entries appended while
+	/// the activity view was not visible. Cleared on the view's actual Show
 	/// event (see eventFilter) and folded back onto the document's retained
 	/// entries whenever eviction or a clear removes some of them (see
-	/// onConsoleEntriesTrimmed): the badge never counts entries the
-	/// document no longer holds. Commit 5 derives the chat side from the
-	/// stream store's seen flags instead; until then this tracker is the
-	/// chat badge's source.
-	ConsoleUnreadTracker m_chatUnseen;
+	/// onConsoleEntriesTrimmed): the badge never counts entries the document
+	/// no longer holds. The chat badge is derived from the stream store's
+	/// seen flags instead (m_chatPresenter).
 	ConsoleUnreadTracker m_activityUnseen;
+
+	/// The process-local chat stream (every accepted chat entry, capped by
+	/// iMaxLogBlocks read as an entry budget) and its projection onto
+	/// m_chatConsole (filter, selected channel, lockstep eviction,
+	/// store-aware Clear, seen-derived badges). Created in setupGui.
+	ChatStreamModel *m_chatStream        = nullptr;
+	ChatStreamPresenter *m_chatPresenter = nullptr;
 
 	/// Connection status strip inside the shell's header container (normal
 	/// mode only). Created during setupGui; owned through the shell.
@@ -210,8 +218,11 @@ public:
 	/// ConsoleSink: renders one accepted console entry into its routed
 	/// destination (chat messages vs. everything else) and tracks the unread
 	/// badge state for entries that arrive while their destination is hidden.
-	void appendConsoleEntry(Log::MsgType mt, const QString &console, bool ownMessage,
-							const QDateTime &dt) Q_DECL_OVERRIDE;
+	/// Chat entries additionally enter the stream store together with their
+	/// routing metadata (HTML and metadata arrive as one accepted entry or
+	/// not at all - everything with a veto ran inside Log already).
+	void appendConsoleEntry(Log::MsgType mt, const QString &console, bool ownMessage, const QDateTime &dt,
+							const ChatRoutingInfo &routing) Q_DECL_OVERRIDE;
 
 	/// ConsoleSink: whether a console entry of the given type is currently
 	/// visible to the user. This is the single presentation boundary used by
@@ -226,16 +237,50 @@ public:
 	/// document()->setDefaultStyleSheet() call sites are gone).
 	void setConsoleStyleSheet(const QString &sheet);
 
-	/// Pushes the configured block limit into every console document
-	/// (setupGui and LogConfig::accept call this).
+	/// Pushes the configured block limit into the activity document (block
+	/// budget) and the chat stream store (entry budget; the chat document is
+	/// bounded in lockstep by the store instead). setupGui and
+	/// LogConfig::accept call this.
 	void applyConsoleBlockLimit();
 
-	/// Refreshes the tab badges from the unread bookkeeping.
+	/// Refreshes the tab badges (activity from the tracker, chat and the
+	/// filter badges from the stream store's seen flags) and the Selected
+	/// Channel availability.
 	void updateConsoleBadges();
 
 	/// The source document lost entries (eviction or a wholesale clear):
 	/// folds the unread bookkeeping onto what the document still retains.
+	/// Activity only - the chat view's bookkeeping lives in the store.
 	void onConsoleEntriesTrimmed(LogConsoleView *source);
+
+	/// The chat filter selection changed (ChatPanel row): forwards to the
+	/// presenter and refreshes badges.
+	void onChatFilterChanged(ChatPanel::ChatFilter filter);
+
+	/// Anything in the chat stream or its projection changed: refreshes the
+	/// chat-derived badges.
+	void onChatStreamStateChanged();
+
+	/// The tree selection moved (qtvUserCurrentChanged): while the Selected
+	/// Channel filter is active it tracks the selection (listener rows
+	/// resolve to the listened channel). Selecting never activates the
+	/// filter.
+	void updateChatFilterSelection();
+
+	/// A channel was removed: if the Selected Channel filter tracked it, the
+	/// filter falls back to All (the store and its scrolls survive).
+	void onChatChannelRemoved(unsigned int channelId);
+
+	/// Whether \p channelId lies inside the subtree rooted at \p rootId, over
+	/// the live channel tree (Selected Channel matching for tree-targeted
+	/// chat entries). Null-safe on both ends.
+	bool chatTreeCovers(unsigned int rootId, unsigned int channelId) const;
+
+	/// Routing metadata for own-message echoes: the send path knows exactly
+	/// what it targeted (channel/tree/direct). The epoch is captured HERE,
+	/// at production time - never at delivery time.
+	ChatRoutingInfo chatRoutingForChannel(unsigned int channelId, bool treeScoped) const;
+	ChatRoutingInfo chatRoutingForDirect(unsigned int session) const;
 
 	/// Ctrl+Shift+L: switches the active console tab.
 	void toggleConsoleTab();

@@ -6,6 +6,7 @@
 #ifndef MUMBLE_MUMBLE_LOG_H_
 #define MUMBLE_MUMBLE_LOG_H_
 
+#include <functional>
 #include <set>
 
 #include <QDateTime>
@@ -26,6 +27,36 @@ class TextToSpeech;
 #endif
 
 class ConsoleSink;
+
+/// Routing metadata a chat-destination entry carries through Log.
+///
+/// Owned value data end to end: the queued thread-bounce delivery and the
+/// deferred startup queue hold their own copies, so the producer's locals
+/// may die at any time - nothing in the metadata path is a pointer.
+/// Producers fill this at PRODUCTION time; the epoch especially belongs to
+/// the connection the message was produced under, never to whichever
+/// connection happens to be current when a queued entry is delivered.
+/// (Namespace scope like LogMessage: a nested ChatRoutingInfo cannot
+/// serve as a default argument inside class Log - its default member
+/// initializers only complete with the enclosing class.)
+struct ChatRoutingInfo {
+	/// Whether routing metadata was attached at all. Chat entries without
+	/// any still render and store (they match the All filter), but they
+	/// match no id-based filter.
+	bool present = false;
+	/// Sender's session id and plain name (empty for the server).
+	unsigned int senderSession = 0;
+	QString senderName;
+	/// Direct (private) recipient sessions.
+	QVector< unsigned int > directSessions;
+	/// Channel ids a channel-scoped send targets.
+	QVector< unsigned int > channelIds;
+	/// Root channel ids a tree-scoped send targets.
+	QVector< unsigned int > treeIds;
+	/// Connection epoch captured at production time (see
+	/// ConnectionEpoch). Only meaningful together with present.
+	quint64 epoch = 0;
+};
 
 class LogConfig : public ConfigWidget, public Ui::LogConfig {
 private:
@@ -161,12 +192,14 @@ public:
 	/// Either defers the LogMessage or defers it, depending on whether Global::l is created already
 	/// (if it is, it is used to directly log the msg)
 	static void logOrDefer(Log::MsgType mt, const QString &console, const QString &terse = QString(),
-						   bool ownMessage = false, const QString &overrideTTS = QString(), bool ignoreTTS = false);
+						   bool ownMessage = false, const QString &overrideTTS = QString(), bool ignoreTTS = false,
+						   const ChatRoutingInfo &routing = ChatRoutingInfo());
 public slots:
 	// We have to explicitly use Log::MsgType and not only MsgType in order to be able to use QMetaObject::invokeMethod
 	// with this function.
 	void log(Log::MsgType mt, const QString &console, const QString &terse = QString(), bool ownMessage = false,
-			 const QString &overrideTTS = QString(), bool ignoreTTS = false);
+			 const QString &overrideTTS = QString(), bool ignoreTTS = false,
+			 const ChatRoutingInfo &routing = ChatRoutingInfo());
 	/// Logs LogMessages that have been deferred so far
 	void processDeferredLogs();
 
@@ -196,8 +229,12 @@ public:
 
 	/// Renders one accepted console entry (past the ignore counter and the
 	/// per-type console flag) into its destination view. The per-entry
-	/// presentation settings are snapshotted by the implementer.
-	virtual void appendConsoleEntry(Log::MsgType mt, const QString &console, bool ownMessage, const QDateTime &dt) = 0;
+	/// presentation settings are snapshotted by the implementer. \p routing is
+	/// the producer-captured chat metadata (empty for non-chat entries); the
+	/// implementer copies whatever it keeps - the reference dies with this
+	/// call.
+	virtual void appendConsoleEntry(Log::MsgType mt, const QString &console, bool ownMessage, const QDateTime &dt,
+									const ChatRoutingInfo &routing) = 0;
 
 	/// Whether entries of this type are currently visible to the user in
 	/// their routed destination. Gates highlight and balloon only - never
@@ -213,10 +250,13 @@ public:
 	bool ownMessage;
 	QString overrideTTS;
 	bool ignoreTTS;
+	/// Producer-captured routing metadata for chat entries (a copy: deferred
+	/// startup logs may outlive their producer by minutes).
+	ChatRoutingInfo routing;
 
 	LogMessage() = default;
 	LogMessage(Log::MsgType mt, const QString &console, const QString &terse, bool ownMessage,
-			   const QString &overrideTTS, bool ignoreTTS);
+			   const QString &overrideTTS, bool ignoreTTS, const ChatRoutingInfo &routing = ChatRoutingInfo());
 };
 
 /// A QTextDocument specialized for log consoles: it only ever loads data:
@@ -271,6 +311,12 @@ public:
 	/// any retained message - until the budget is met. The newest entry is
 	/// always kept (a single oversized entry may overshoot the budget).
 	void enforceBlockBudget();
+	/// Removes the \p count oldest complete entries (same frame and separator
+	/// discipline as enforceBlockBudget; emits entriesTrimmed with the number
+	/// of removed message entries). The store-driven chat view uses this to
+	/// keep its document in lockstep with the stream store's own eviction.
+	/// Returns the number of message entries actually removed.
+	int removeLeadingEntries(int count);
 	/// Overwrites the resource for \p name with the shared 1x1 placeholder
 	/// and records the name's key as stale. Qt has no API to remove a
 	/// resource-cache entry, so the KEY stays until the owning view compacts
@@ -319,6 +365,13 @@ private:
 	/// reference anywhere in the document (an image pasted twice keeps its
 	/// bytes while any copy is retained).
 	void releaseUnreferencedImageResources(const QSet< QUrl > &candidates);
+	/// Shared trimming core of enforceBlockBudget() and
+	/// removeLeadingEntries(): removes leading whole frames while \p shouldTrim
+	/// (called with the number of message entries removed so far) returns
+	/// true, always keeping the newest entry, then drops obsolete leading date
+	/// separators and emits entriesTrimmed. Returns the number of removed
+	/// message entries.
+	int trimInternal(const std::function< bool(int) > &shouldTrim);
 
 	int m_blockBudget           = 0;
 	int m_resourceKeyBudget     = 1024 * 1024;
@@ -341,5 +394,6 @@ private:
 };
 
 Q_DECLARE_METATYPE(Log::MsgType)
+Q_DECLARE_METATYPE(ChatRoutingInfo)
 
 #endif
