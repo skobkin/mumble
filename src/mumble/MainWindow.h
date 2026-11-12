@@ -14,6 +14,7 @@
 
 #include "ChatStreamModel.h"
 #include "ChatStreamPresenter.h"
+#include "ChatTarget.h"
 #include "ConsoleUnreadTracker.h"
 #include "CustomElements.h"
 #include "Log.h"
@@ -295,6 +296,9 @@ public:
 	void loadState(bool minimalView);
 	void storeState(bool minimalView);
 
+	/// Resolves the composer's send target (placeholder, send routing and
+	/// enablement all go through this one decision table; see ChatTarget).
+	ChatTarget currentChatTarget() const;
 	void updateChatBar();
 	void openTextMessageDialog(ClientUser *p);
 	void openUserLocalNicknameDialog(const ClientUser &p);

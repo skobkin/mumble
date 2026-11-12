@@ -542,6 +542,12 @@ void MainWindow::msgUserState(const MumbleProto::UserState &msg) {
 				// use for the tray icon).
 				emit talkingStatusChanged();
 			}
+			// The same no-signal gap: a renamed user can be the composer's
+			// selected target, and the placeholder shows the name. Refresh
+			// only when it actually is the selection's user row.
+			if (pDst == pmModel->getUser(qtvUsers->currentIndex())) {
+				updateChatBar();
+			}
 		}
 	}
 

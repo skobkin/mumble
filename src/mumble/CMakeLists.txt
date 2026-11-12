@@ -143,6 +143,8 @@ set(MUMBLE_SOURCES
 	"ChatStreamModel.h"
 	"ChatStreamPresenter.cpp"
 	"ChatStreamPresenter.h"
+	"ChatTarget.cpp"
+	"ChatTarget.h"
 	"ConnectionEpoch.h"
 	"QuitBehavior.h"
 	"CustomElements.cpp"

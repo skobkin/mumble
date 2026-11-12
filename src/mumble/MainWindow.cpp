@@ -2612,25 +2612,27 @@ void MainWindow::sendChatbarMessage(QString qsMessage) {
 	if (Global::get().uiSession == 0)
 		return; // Check if text & connection is available
 
-	ClientUser *p = pmModel->getUser(qtvUsers->currentIndex());
-	Channel *c    = pmModel->getChannel(qtvUsers->currentIndex());
+	// Re-resolved at send time through the same decision table as the
+	// placeholder: the placeholder is a presentation, never a routing
+	// input, so the two can never disagree.
+	const ChatTarget target = currentChatTarget();
 
-	if (!Global::get().s.bChatBarUseSelection || !p || p->uiSession == Global::get().uiSession) {
-		// Channel message
-		if (!Global::get().s.bChatBarUseSelection || !c) // If no channel selected fallback to current one
-			c = ClientUser::get(Global::get().uiSession)->cChannel;
-
-		Global::get().sh->sendChannelTextMessage(c->iId, qsMessage, false);
-		Global::get().l->log(Log::TextMessage, tr("To %1: %2").arg(Log::formatChannel(c), qsMessage),
-							 tr("Message to channel %1").arg(c->qsName), true, QString(), false,
-							 chatRoutingForChannel(c->iId, false));
-	} else {
+	if (target.kind == ChatTarget::Kind::User) {
 		// User message
-		Global::get().sh->sendUserTextMessage(p->uiSession, qsMessage);
-		Global::get().l->log(Log::TextMessage, tr("To %1: %2").arg(Log::formatClientUser(p, Log::Target), qsMessage),
-							 tr("Message to %1").arg(p->qsName), true, QString(), false,
-							 chatRoutingForDirect(p->uiSession));
+		Global::get().sh->sendUserTextMessage(target.user->uiSession, qsMessage);
+		Global::get().l->log(Log::TextMessage,
+							 tr("To %1: %2").arg(Log::formatClientUser(target.user, Log::Target), qsMessage),
+							 tr("Message to %1").arg(target.user->qsName), true, QString(), false,
+							 chatRoutingForDirect(target.user->uiSession));
+	} else if (target.kind == ChatTarget::Kind::Channel) {
+		// Channel message
+		Global::get().sh->sendChannelTextMessage(target.channel->iId, qsMessage, false);
+		Global::get().l->log(Log::TextMessage, tr("To %1: %2").arg(Log::formatChannel(target.channel), qsMessage),
+							 tr("Message to channel %1").arg(target.channel->qsName), true, QString(), false,
+							 chatRoutingForChannel(target.channel->iId, false));
 	}
+	// Disconnected (or the resolver's defensive degradation against a
+	// disconnect race): nothing to send.
 }
 
 /// Handles Backtab/Shift-Tab for qteChat, which allows
@@ -3075,12 +3077,24 @@ void MainWindow::updateMenuPermissions() {
 	qaChannelHide->setEnabled(target.channel);
 	qaChannelPin->setEnabled(target.channel);
 
+	// The chatbar enablement follows the composer's OWN target resolution
+	// (currentChatTarget), never the context-menu target this function
+	// otherwise computes from: right-clicking a foreign row must not gate
+	// the composer on that row's permissions. The permission rule itself
+	// is unchanged - channel-scoped Write|TextMessage with the same
+	// optimistic All window while the real permissions are still unknown.
 	bool chatBarEnabled = false;
 	if (Global::get().uiSession) {
-		if (Global::get().s.bChatBarUseSelection && (target.channel || target.user)) {
-			chatBarEnabled = p & (ChanACL::Write | ChanACL::TextMessage);
-		} else if (homec) {
-			chatBarEnabled = homep & (ChanACL::Write | ChanACL::TextMessage);
+		const ChatTarget chatTarget = currentChatTarget();
+		Channel *chatChannel        = chatTarget.permissionChannel;
+		if (chatChannel) {
+			ChanACL::Permissions chatp = static_cast< ChanACL::Permissions >(chatChannel->uiPermissions);
+			if (!chatp) {
+				Global::get().sh->requestChannelPermissions(chatChannel->iId);
+				chatp                      = chatChannel->iId == 0 ? Global::get().pPermissions : ChanACL::All;
+				chatChannel->uiPermissions = chatp;
+			}
+			chatBarEnabled = chatp & (ChanACL::Write | ChanACL::TextMessage);
 		}
 	}
 	qteChat->setEnabled(chatBarEnabled);
@@ -4412,22 +4426,30 @@ void MainWindow::qtvUserCurrentChanged(const QModelIndex &, const QModelIndex &)
 	updateChatFilterSelection();
 }
 
+ChatTarget MainWindow::currentChatTarget() const {
+	const QModelIndex idx = qtvUsers->currentIndex();
+	const bool selectionIsListenerProxy =
+		idx.data(UserModel::RowKindRole).toInt() == static_cast< int >(UserModel::RowKind::Listener);
+	return resolveChatTarget(pmModel->getUser(idx), pmModel->getChannel(idx), selectionIsListenerProxy,
+							 Global::get().uiSession != 0 ? ClientUser::get(Global::get().uiSession) : nullptr,
+							 Global::get().s.bChatBarUseSelection);
+}
+
 void MainWindow::updateChatBar() {
-	User *p    = pmModel->getUser(qtvUsers->currentIndex());
-	Channel *c = pmModel->getChannel(qtvUsers->currentIndex());
+	const ChatTarget target = currentChatTarget();
 
-	if (Global::get().uiSession == 0) {
-		qteChat->setDefaultText(tr("<center>Not connected</center>"), true);
-	} else if (!Global::get().s.bChatBarUseSelection || !p || p->uiSession == Global::get().uiSession) {
-		// Channel tree target
-		if (!Global::get().s.bChatBarUseSelection || !c) // If no channel selected fallback to current one
-			c = ClientUser::get(Global::get().uiSession)->cChannel;
-
-		qteChat->setDefaultText(
-			tr("<center>Type message to channel '%1' here</center>").arg(c->qsName.toHtmlEscaped()));
-	} else {
-		// User target
-		qteChat->setDefaultText(tr("<center>Type message to user '%1' here</center>").arg(p->qsName.toHtmlEscaped()));
+	switch (target.kind) {
+		case ChatTarget::Kind::Disconnected:
+			qteChat->setDefaultText(tr("<center>Not connected</center>"), true);
+			break;
+		case ChatTarget::Kind::Channel:
+			qteChat->setDefaultText(
+				tr("<center>Type message to channel '%1' here</center>").arg(target.displayName().toHtmlEscaped()));
+			break;
+		case ChatTarget::Kind::User:
+			qteChat->setDefaultText(
+				tr("<center>Type message to user '%1' here</center>").arg(target.displayName().toHtmlEscaped()));
+			break;
 	}
 
 	updateMenuPermissions();
@@ -4844,6 +4866,10 @@ void MainWindow::refreshUiAfterSettingsAccepted() {
 	setupView(false);
 	updateTransmitModeComboBox(Global::get().s.atTransmit);
 	updateUserModel();
+	// The composer target resolution reads bChatBarUseSelection; toggling
+	// it must re-resolve (the placeholder would otherwise stay on the
+	// previous target kind until the next selection change).
+	updateChatBar();
 	updateAudioToolTips();
 	emit talkingStatusChanged();
 }
