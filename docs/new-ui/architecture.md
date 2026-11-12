@@ -152,7 +152,7 @@ flowchart TD
     Shell --> Voice[VoiceControlBar]
     Actions[Existing QActions + transmission methods] --> Header
     Actions --> Voice
-    Log[Existing Log policy] -->|appendConsoleEntry proposal| MW
+    Log[Existing Log policy] -->|ConsoleSink appendConsoleEntry| MW
     MW -->|route by MsgType| Chat
     MW -->|route by MsgType| Activity
     Log -->|existing notifications exactly once| Notifications[Tray / TTS / sounds]
@@ -218,75 +218,120 @@ to `settingsAccepted`, including Apply, and use it for initial refresh. Keep
 PTT-window visibility and action state synchronized. Do not introduce audio
 restarts beyond the existing configuration flow.
 
-### 4.3 Chat and activity: preserve semantics before improving appearance
+### 4.3 Chat and activity: shipped design (Stage 5)
 
-Findings:
+The combined log dock is replaced by two destinations inside `ChatPanel` — a
+`Chat | Activity` switch row over a `QStackedWidget`, the composer below — with
+the policy kept in `Log` and the presentation reached through one seam.
 
-- Incoming `msgTextMessage()` drops locally ignored senders, distinguishes
-  tree/channel/private scope, formats sender links, and computes TTS overrides.
-  It passes a formatted HTML string to `Log`; it does not emit a structured
-  message object. Server welcome text is `Log::Information`, while a server
-  text message can be `Log::TextMessage`.
-- Outgoing chat uses Markdown conversion or Ctrl+Enter plain-text escaping,
-  then `sendChatbarMessage()`. Other paths include user/channel dialogs, tree
-  sends, configured text shortcuts, and clipboard sends
-  (`MainWindow.cpp:2118,2231,2603,3282`). Outgoing private echoes are currently
-  `Log::TextMessage` with `ownMessage=true`, not `PrivateTextMessage`.
-- `Log::log()` owns ignore counters, `Settings::LogConsole` eligibility,
-  timestamps, notifications, TTS, sounds, and insertion. Its notification
-  suppression currently tests active main window plus **log dock visibility**.
-- `Log::validHtml():642` filters link schemes and oversized content;
-  `LogDocument::loadResource():979` permits data images and rejects other
-  external resources. Preserve these constraints and supported rich content.
+**Sink boundary.** `Log` keeps 100% of policy: ignore counters, the
+`Settings::LogConsole` gate, timestamps, highlight/balloon/sound/TTS decisions.
+Accepted console entries are handed to a `ConsoleSink` interface
+(`appendConsoleEntry(mt, console, ownMessage, dt, routing)` +
+`isConsoleEntryVisible(mt)`); `MainWindow` implements it and routes to the
+destination views. Lifetime is explicit: registration in `main.cpp` between
+`Log` creation and `processDeferredLogs()` (so deferred startup logs replay
+through the live sink), detachment as `~MainWindow`'s first statement (the
+window dies before `Log`), and a null-sink guard that drops entries in the
+shutdown window. `Log::log()` queues a metatype-registered copy of everything
+across the thread bounce — nothing dangles.
 
-Required first split:
+**Routing.** `LogConsoleView::isChatMessageType`: `TextMessage` and
+`PrivateTextMessage` → Chat; every other type (including `PluginMessage`, which
+sits outside the historic `[firstMsgType, lastMsgType]` range and must never be
+misrouted by range arithmetic) → Activity. Each view is a `LogConsoleView` that
+owns its `LogDocument` and renders entries byte-identically to the former
+inline `Log::log()` insertion block (frames, date separators, timestamp
+formatting, `validHtml` sanitization, scroll preservation: own-message
+scroll-to-end, incoming scroll preservation). The former dock `qteLog` and its
+`.ui` block are gone; both views are code-created and adopted by `ChatPanel`.
 
-1. Extract browser append logic without changing output. Proposed MainWindow
-   method `appendConsoleEntry(Log::MsgType, const QString &, bool ownMessage,
-   const QDateTime &)` forwards to the chosen browser. `Log::log()` calls it
-   only after existing ignore and `LogConsole` decisions. Keep notification,
-   sound, and TTS processing in Log, exactly once.
-2. Route `TextMessage` and `PrivateTextMessage` to Chat; all other types to
-   Activity, including welcome/errors/plugin events. Label both destinations
-   clearly; show an unread indicator for hidden activity without generating a
-   second notification. Do not classify by localized text or parse rendered
-   HTML. Preserve chronological order within each stream and across reconnects
-   for the life of this process; add no disk history.
-3. Replace the dock visibility test with a proposed
-   `MainWindow::isConsoleEntryVisible(MsgType)` query: active main window and
-   the actual destination exposed, not an inactive tab or hidden/minimal pane.
-   Preserve the other notification flags and own-message rules. Do not add a
-   scroll-to-bottom requirement to notification suppression in this change.
-4. Give each browser independent date/scroll tracking. Preserve own-message
-   scroll-to-end, incoming-message scroll preservation, timestamps, trailing
-   whitespace marking, and clear/copy/link/image behavior. Parameterize existing
-   MainWindow log context-menu/resource helpers by source browser; never look
-   up an activity image in the chat document.
-5. Update `LogConfig::accept()` and `Themes::apply()` through a small MainWindow
-   forwarding method so both documents receive limits/styles. Apply the existing
-   `iMaxLogBlocks` setting to each; two documents can increase retained output
-   and must be measured. Do not keep a hidden third copy or an unbounded message
-   vector. Test actual eviction with rich content: Qt documents
-   [maximumBlockCount as undefined for tables/frames](https://doc.qt.io/qt-6/qtextdocument.html#maximumBlockCount-prop),
-   and the current renderer inserts frames. Merely setting that property does
-   not prove bounded memory. If the fixture reproduces ineffective eviction,
-   implement a separate, reviewed renderer fix that trims oldest complete
-   entries using the existing block budget and releases their resources;
-   preserve the existing unlimited setting. Do not silently strip rich content.
+**Visibility and unread.** `MainWindow::isConsoleEntryVisible(mt)` answers per
+routed destination only: active window AND that destination `isVisible()` (the
+inactive tab's stacked page, minimal mode and hidden ancestors are all really
+hidden). It gates highlight and balloon only — never sound or TTS. Unread
+state is badges, purely visual: the inactive tab shows `Name (N)` (capped
+`99+`); the activity badge can carry a warning state when unseen
+Warning/CriticalError entries exist; counts track retained entries (they drop
+with evictions) and clear on actual `QEvent::Show`. Accessible names announce
+the counts; no second notification is ever generated.
 
-Keep the initial chat as a single process-local stream with explicit targets,
-not per-channel tabs. Switching visible content must not redirect the composer.
-If a separate target label is added, extract the existing selection/fallback
-decision into a shared MainWindow resolver used by sending and `updateChatBar()`;
-resolve again on send and preserve current permission checks. Test selected
-user, selected channel, self, no selection, listener proxy, and
-`bChatBarUseSelection=false`. No new conversation routing policy is implied.
+**Hybrid chat stream.** ONE process-local bounded store of accepted chat
+entries (`ChatStreamModel`); the rendered chat view is a pure projection of
+(store, filter, selected channel, connection epoch). HTML and routing metadata
+enter the store **atomically at the sink boundary** — strictly after the ignore
+counter and the `LogConsole` gate — so a suppressed message can never reappear
+through a filter rebuild. Routing metadata (`ChatRoutingInfo`: sender
+session/name, direct sessions, channel ids, tree ids, connection epoch) is
+owned value data end to end, captured **at production time** (`msgTextMessage`
+and all five outgoing echo sites; the epoch comes from an atomic
+`ConnectionEpoch` counter bumped at every connection lifecycle start, never at
+delivery time). Classification mirrors `msgTextMessage` exactly:
+tree > channel > direct.
 
-Optional later work: structured in-memory message metadata captured **before**
-HTML formatting if a reviewed design requires conversation filtering; a
-secondary read-only user list after selection/index mapping is designed;
-further model/view decoupling when a concrete second consumer needs it. None is
-a prerequisite for the first usable shell.
+- Filters **All / Selected Channel / Direct** (a checkable `QToolButton` row,
+  visible only while Chat is active; deliberately NOT `autoExclusive` — Qt's
+  radio-group semantics strip TabFocus from every sibling button, breaking
+  keyboard reachability; exactly-one-checked is enforced manually).
+- **Epoch-scoped matching:** channel/session ids are per-connection; id-based
+  matching (Selected Channel) is valid only within the entry's connection
+  epoch, with tree-root coverage resolved against the live channel tree.
+  Reused ids after a reconnect can neither leak old messages into a channel
+  view nor hide new ones. `All` and `Direct` are topology-free and keep the
+  full process-local history. No disk history; the store survives reconnects
+  for the process lifetime.
+- **Lockstep eviction:** store eviction removes the corresponding rendered
+  frames (and their date separators, with resource release) from the active
+  view in the same step — the document never outgrows the store. A filter
+  rebuild regenerates from the store and is tested content-identical to the
+  live document.
+- **Store-aware Clear:** clearing Chat removes the ACTIVE filter's entries
+  from the store itself (a bare widget clear would be undone by the next
+  rebuild); hidden entries behind other filters survive and stay reachable.
+  Clearing Activity clears only the activity document.
+- **Seen-derived badges:** an entry is seen when actually displayed (matching
+  live append while the chat view is visible, or display during a rebuild).
+  The Chat tab badge counts unseen entries; each filter button shows the
+  unseen count matching that filter — all derived from the store's `seen`
+  flags, no parallel counters. Filters never change highlight/balloon/sound/
+  TTS behavior; a filter-hidden entry is surfaced by badges, not notifications.
+- Per-filter scroll positions are saved and restored across rebuilds; a filter
+  visited for the first time starts at the bottom. Losing the tracked channel
+  (removed or disconnected) falls back to All. Selecting a channel in the tree
+  never auto-activates the filter (it would flip views under autocomplete).
+
+**Memory bounds.** `setMaximumBlockCount` is never called again — it is
+documented as undefined for frame-based documents and demonstrably corrupts
+them (trims at most once, then grows unchecked; near the structural minimum it
+wipes the document). `LogDocument` enforces a whole-entry block budget instead:
+oldest complete message frames are removed atomically (single cursor removal
+with both endpoints in the root frame), date separators whose date no longer
+labels any retained message go with it, block counts come from manual
+iteration (Qt's own counters are undefined with frames), and the newest entry
+is always kept. Evicted `data:` images are released and re-decoded on
+re-reference (renderer-driven rehydration — `resource()` can never trigger
+`loadResource()` again for a cached name); stale resource-cache keys (URL
+strings Qt keeps forever) are bounded by byte-budget-gated compaction into a
+fresh document with identical content. Undo stacks are disabled (display-only).
+
+**The two `iMaxLogBlocks` interpretations:** Activity = a per-document block
+budget; Chat = an entry budget on the single store. One setting, two
+documented units.
+
+**Composer target.** One pure decision table (`ChatTarget`/`resolveChatTarget`,
+Global-free) replaces the duplicated inline logic of the placeholder and the
+send path: selection user/channel, self-channel fallback, listener-proxy rows,
+`bChatBarUseSelection`, and a defensive degradation to Disconnected instead of
+the former null-deref race on disconnect. `sendChatbarMessage()` re-resolves
+at send — the placeholder is a presentation, never a routing input. The
+composer's enablement follows the composer's own target (channel-scoped
+`Write|TextMessage` with the optimistic `All` window while real permissions
+are unknown), not the context-menu target. An explicit destination label above
+the input ("To channel: X" / "To user: Y", path tooltip for nested channels,
+listener-proxy note) is pushed only from `updateChatBar` so label and
+placeholder can never disagree; it is visible regardless of tab/filter and is
+never a routing input. `gsSendTextMessage`'s always-current-channel divergence
+is documented, not changed.
 
 ## 5. Configuration compatibility — required design
 
@@ -465,6 +510,17 @@ version; initially require an exact match and fall back to safe placement on
 mismatch. Reject oversized/invalid base64, negative/implausible sizes, wrong
 types, and unsupported versions before calling Qt. Bounds checking is not a
 guarantee that arbitrary Qt geometry is safe.
+
+**`layoutRevision` 2 (Stage 5).** The rev-1 field `activityVisible` (serialized
+by stages 1–4 but never consumed by any shipped UI) is retired: rev-1 files
+are still accepted, the field is ignored, and it is no longer written.
+Revision 2 adds `activeTabIsActivity` (bool, default `false` = Chat is the
+initial tab). `UiStateStore::load()` migrates older revisions explicitly:
+accept the file, default-fill the fields the running revision expects but the
+file lacks, and stamp the current revision on the next save — never silently
+reinterpret the old boolean. `NewerVersion` refusal is untouched; rev-1 files
+are never quarantined. The filter choice is session-only (default All, not
+persisted).
 
 Use existing JSON support and `QSaveFile(QString)` with checked writes/commit,
 without direct-write fallback, for this **new file only**. This gives a
@@ -678,24 +734,37 @@ editing MainWindow/Log/ConfigDialog concurrently; hand off at reviewed commits.
   (3) combo relocation using existing setting/logic. Keep one functioning control
   path at each intermediate commit.
 
-### Stage 5 — chat/activity split
+### Stage 5 — chat/activity split (SHIPPED as commits 1–8)
 
-- **Scope/files:** `Log`, `CustomElements`, MainWindow log/image handlers,
-  `Themes`, `LogConfig`, `ChatPanel`; no protocol modifications.
-- **Refactorings:** extract append renderer first while combined output remains;
-  parameterize browser-specific interactions; then route by event type and
-  update visibility policy, style/limits, and activity indicators together.
-  Introduce shared target resolution only with the explicit target label.
-- **Dependencies:** Stages 1–2; follow Stage 4 to avoid MainWindow conflicts.
-- **Risks:** missing/duplicated messages, unsafe rich content, wrong-target
-  sending, duplicate notifications, image resource mismatch, hidden errors.
-- **Acceptance/tests:** replay every send/receive source into fixtures; verify
-  routing, timestamps, scroll, links/images, ignore/LogConsole settings,
-  notifications, TTS/sound calls, and memory caps. No server needed for renderer
-  policy tests; use a server for delivery, permissions and reconnect behavior.
-- **Atomic commits:** (1) reusable renderer; (2) source-browser interaction
-  helpers; (3) routing with visibility/style/limits integration; (4) target-label
-  resolver refactor and presentation as separate commits if independently useful.
+- **Scope/files:** `Log`, `LogDocument`/`LogConsoleView`, `ChatStreamModel`/
+  `ChatStreamPresenter`, `ConnectionEpoch`, `ChatTarget`, MainWindow log/image
+  handlers, `Messages.cpp`, `Themes`, `LogConfig`, `ChatPanel`, sidecar
+  revision 2; no protocol modifications. See §4.3 for the shipped design.
+- **Shipped commits:** (1) reusable append renderer (`LogConsoleView`, byte-
+  identical extraction); (2) source-browser interaction parameterization +
+  atomic cursor/document image capture; (3) whole-entry block budget
+  replacing `setMaximumBlockCount` (eviction, resource release/rehydration,
+  key-budget compaction; `TestLogDocument`); (4) tabbed chat/activity split +
+  `ConsoleSink` seam with ordered lifetime + per-destination visibility +
+  unread badges + sidecar `layoutRevision` 2; (5) chat stream: routing
+  metadata through `Log::log` as owned value data, producer-captured
+  connection epochs, `ChatStreamModel` + All/Selected Channel/Direct filters,
+  lockstep store↔document eviction, store-aware Clear, seen-derived badges
+  (`TestChatStream`); (6) shared `ChatTarget` resolver (placeholder/send/
+  enablement; re-resolve on send; `TestChatTarget`); (7) explicit composer
+  target label; (8) this documentation + the stage-5 manual checklist.
+- **Automated coverage:** `TestLogPresentation` (renderer parity, sink
+  contract incl. cross-thread queued routing metadata, policy gating,
+  deferred replay), `TestLogDocument` (eviction/resource lifecycle/compaction
+  incl. the reproducing corruption gate), `TestChatStream` (store caps,
+  classification parity, epoch isolation, badges, lockstep eviction
+  equivalence, Clear matrix), `TestChatTarget` (full decision matrix),
+  `TestMainWindowShell` (switch/filter rows, badges, visibility matrix,
+  keyboard chains, target label), `TestUiStateStore` (revision-2 migration).
+- **Still manual (see `stage5-manual-checklist.md`):** two-client delivery +
+  filters on a real server, permission-denied flows, reconnect ordering with
+  filters active, live theme restyle, large-font/RTL/narrow desktop pass,
+  screen-reader pass, memory-soak numbers for the PR.
 
 ### Stage 6 — integration parity
 
