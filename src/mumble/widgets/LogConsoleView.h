@@ -88,23 +88,30 @@ public:
 	void compact();
 	/// Wholesale rebuild for filter projections: clears (fresh document, all
 	/// budgets and the theme carried over) and re-appends \p sources in
-	/// order. The leading date-separator state is carried over from the
-	/// document being replaced (the same seeding rule compact() uses): a
-	/// leading separator is reproduced when the live view had one and not
-	/// invented when it did not, so a rebuilt projection stays
-	/// content-identical to the live-evicted view. The view's
-	/// retained-source list becomes exactly \p sources.
+	/// order. The leading date-separator state is derived from the SOURCES
+	/// alone - the deterministic projection rule: a rebuilt projection
+	/// always begins with a date separator labeling its oldest entry's
+	/// date, and an empty projection resets the date state so the next
+	/// entry (live or in a later rebuild) re-establishes the rule. Which
+	/// filter was previously active is irrelevant: the document being
+	/// replaced may belong to a different projection, so its separator
+	/// state says nothing about this one. Live eviction converges to the
+	/// same rule (see removeLeadingRenderedEntries), keeping
+	/// live-append/rebuild equivalence after eviction and compaction. The
+	/// view's retained-source list becomes exactly \p sources.
 	void rebuild(const QVector< EntrySource > &sources);
 	/// Removes the \p count oldest rendered entries (whole frames + their
 	/// date separators). Unlike the block budget this may remove EVERY
 	/// rendered entry - the store-driven chat view uses it for lockstep
 	/// eviction, and the document must not keep a ghost the store already
-	/// evicted. Returns the number of entries actually removed. An emptied
-	/// view resets its date state; a non-empty one is left starting with a
-	/// date separator labeling its oldest retained entry's date
-	/// (re-inserted when eviction consumed a same-date predecessor), which
-	/// is what keeps the live view content-identical to a rebuilt
-	/// projection of the same sources.
+	/// evicted. Returns the number of entries actually removed. Afterwards
+	/// the view satisfies the deterministic projection rule: an emptied
+	/// view resets its date state (the next entry re-establishes the
+	/// leading separator), and a non-empty one starts with a date
+	/// separator labeling its oldest retained entry's date (re-inserted
+	/// when eviction consumed a same-date predecessor). This is what keeps
+	/// the live view content-identical to a rebuilt projection of the same
+	/// sources.
 	int removeLeadingRenderedEntries(int count);
 
 signals:

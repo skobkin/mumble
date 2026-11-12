@@ -113,10 +113,19 @@ private slots:
 	void dateSeparatorInsertedOnDateChange();
 
 	// A rebuild reproduces the live document's leading date separator
-	// exactly: eviction leaves (or re-establishes) the separator the
-	// projection shows, and the rebuild keeps the view content-identical
-	// instead of re-deriving the leading state from the current date.
+	// exactly: live eviction converges to the deterministic projection
+	// rule (a projection always begins with a separator labeling its
+	// oldest entry's date; an emptied view resets the date state), and a
+	// rebuild derives the same rule from the sources alone - never from
+	// the replaced document or the current date.
 	void rebuildReproducesLiveLeadingDateSeparator();
+
+	// The projection rule is a function of the sources alone: consecutive
+	// rebuilds whose first retained entries have DIFFERENT dates each get
+	// their own leading separator, regardless of what the previous
+	// projection showed; identical sources rebuild identically; an empty
+	// projection leaves the view empty and re-arms the rule.
+	void rebuildLeadingSeparatorIsDeterministic();
 
 	// Store-driven removal is exact: the return value equals the number of
 	// message entries removed across date separators, non-rendered
@@ -356,9 +365,10 @@ void TestLogPresentation::rebuildReproducesLiveLeadingDateSeparator() {
 	QVERIFY(hasLeadingSeparator(view));
 
 	// A rebuild from the same retained sources must reproduce the live
-	// document exactly - including the leading [today] separator: the
-	// live view converged to it through the evictions, and the rebuild
-	// carries the replaced document's leading state over.
+	// document exactly - including the leading [today] separator, which
+	// both paths derive from the deterministic projection rule (the
+	// rebuild seeds it from the sources alone, the live view converged to
+	// it through the evictions).
 	const QVector< LogConsoleView::EntrySource > sources = {
 		{ at(base, 0, 3), QLatin1String("<p>new1</p>"), false, settings() },
 		{ at(base, 0, 4), QLatin1String("<p>new2</p>"), false, settings() }
@@ -374,8 +384,8 @@ void TestLogPresentation::rebuildReproducesLiveLeadingDateSeparator() {
 	// The same-day convergence rule: all-today entries start WITHOUT a
 	// leading separator (the session inherits the construction date), but
 	// once eviction consumes the oldest entry's same-date predecessors, the
-	// live view re-inserts the leading separator - the shape a rebuild of
-	// the same sources reproduces.
+	// live view re-inserts the leading separator - converging to the
+	// deterministic projection rule a rebuild follows.
 	LogConsoleView view2;
 	view2.appendEntry(at(base, 0, 5), QLatin1String("<p>a</p>"), false, settings());
 	view2.appendEntry(at(base, 0, 6), QLatin1String("<p>b</p>"), false, settings());
@@ -401,6 +411,63 @@ void TestLogPresentation::rebuildReproducesLiveLeadingDateSeparator() {
 	view2.appendEntry(at(base, 0, 8), QLatin1String("<p>d</p>"), false, settings());
 	QCOMPARE(static_cast< LogDocument * >(view2.document())->entryCount(), 1);
 	QVERIFY(hasLeadingSeparator(view2));
+}
+
+void TestLogPresentation::rebuildLeadingSeparatorIsDeterministic() {
+	LogConsoleView view;
+	const QDate dayA(2024, 3, 1);
+	const QDate dayB(2024, 3, 3);
+	const auto leadingRoleOf = [](LogConsoleView &v) {
+		return v.document()->rootFrame()->childFrames().constFirst()->frameFormat().intProperty(
+			LogDocument::FrameRoleProperty);
+	};
+	const auto separatorDateMatches = [&view](const QDate &day) {
+		const QString expected =
+			QString::fromLatin1("[Date changed to %1]").arg(QLocale().toString(day, QLocale::ShortFormat));
+		return view.document()->toPlainText().contains(expected);
+	};
+	const LogConsoleView::EntrySource a1 = { QDateTime(dayA, QTime(10, 0, 0)), QLatin1String("<p>a1</p>"), false,
+											 settings() };
+	const LogConsoleView::EntrySource b1 = { QDateTime(dayB, QTime(10, 0, 0)), QLatin1String("<p>b1</p>"), false,
+											 settings() };
+	const LogConsoleView::EntrySource b2 = { QDateTime(dayB, QTime(11, 0, 0)), QLatin1String("<p>b2</p>"), false,
+											 settings() };
+
+	// Projection over dayA: leading separator labels dayA.
+	view.rebuild({ a1 });
+	QCOMPARE(static_cast< LogDocument * >(view.document())->entryCount(), 1);
+	QCOMPARE(leadingRoleOf(view), static_cast< int >(LogDocument::DateFrameRole));
+	QVERIFY(separatorDateMatches(dayA));
+	const QString dayAProjection = view.document()->toPlainText();
+
+	// Projection over dayB - a DIFFERENT first-retained date: its own
+	// leading separator, not the previous projection's state (the
+	// replaced document's leading [dayA] frame must not suppress it).
+	view.rebuild({ b1, b2 });
+	QCOMPARE(static_cast< LogDocument * >(view.document())->entryCount(), 2);
+	QVERIFY(separatorDateMatches(dayB));
+	QVERIFY(!view.document()->toPlainText().contains(QLatin1String("a1")));
+	// Exactly one separator: b2's same-date append adds none.
+	QCOMPARE(view.document()->toPlainText().count(QLatin1String("[Date changed to")), 1);
+
+	// Identical sources rebuild identically, whatever came before - a
+	// second view that reached the dayA projection through a live append
+	// plus a rebuild renders the same content.
+	LogConsoleView other;
+	other.appendEntry(a1.timestamp, a1.consoleHtml, a1.ownMessage, a1.settings);
+	other.rebuild({ a1 });
+	QCOMPARE(other.document()->toPlainText(), dayAProjection);
+	// ...and switching back to the dayA projection reproduces it exactly
+	// (no dependence on the dayB projection shown in between).
+	view.rebuild({ a1 });
+	QCOMPARE(view.document()->toPlainText(), dayAProjection);
+
+	// An empty projection empties the view completely and re-arms the
+	// rule: the next projection starts with its own separator again.
+	view.rebuild({});
+	QCOMPARE(view.document()->rootFrame()->childFrames().count(), 0);
+	view.rebuild({ b1 });
+	QVERIFY(separatorDateMatches(dayB));
 }
 
 void TestLogPresentation::storeDrivenRemovalMatchesEvictedCount() {

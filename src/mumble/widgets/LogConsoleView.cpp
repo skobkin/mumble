@@ -286,19 +286,18 @@ void LogConsoleView::onEntriesTrimmed(int count) {
 }
 
 void LogConsoleView::rebuild(const QVector< EntrySource > &sources) {
-	// The leading-separator state of the document being replaced is part of
-	// the rendered history: a leading date frame says the oldest retained
-	// entry's date differs from an entry evicted before it, which is not
-	// derivable from the sources alone. Live eviction keeps that frame, so
-	// a rebuilt projection must reproduce it (and must not invent one when
-	// the live view has none) - the same seeding rule compact() uses keeps
-	// both paths content-identical instead of re-deriving the leading
-	// separator from the current date.
-	const bool leadingDateFrame = hasLeadingDateFrame(document());
+	// Deterministic projection rule, derived from the SOURCES alone: the
+	// rebuilt projection always begins with a date separator labeling its
+	// oldest entry's date (seeding the date state with an invalid date
+	// makes the first entry's separator unconditional), and an empty
+	// projection resets the state so the next entry re-establishes the
+	// rule. The document being replaced is deliberately NOT consulted: it
+	// may belong to a different filter, so its leading-separator state
+	// would make this projection depend on the previously active one.
+	// clearConsole() reseeded the state with the current date; override it
+	// with the rule's seed in both branches.
 	clearConsole();
-	if (!sources.isEmpty()) {
-		m_lastEntryDate = regeneratedSeedDate(leadingDateFrame, sources.constFirst().timestamp.date());
-	}
+	m_lastEntryDate = QDate();
 	for (const EntrySource &source : sources) {
 		appendEntry(source.timestamp, source.consoleHtml, source.ownMessage, source.settings);
 	}
@@ -315,16 +314,18 @@ int LogConsoleView::removeLeadingRenderedEntries(int count) {
 	const int removed = doc->removeLeadingEntries(count);
 
 	if (doc->entryCount() == 0) {
-		// Emptied: the next entry starts a fresh projection, and a rebuild
-		// of the same (still empty) store seeds the identical state, so
-		// both paths stay content-identical.
+		// Emptied: the next entry - a live append here, or the same sources
+		// in a later rebuild (rebuild seeds the identical state) -
+		// re-establishes the leading separator, keeping both paths
+		// content-identical.
 		m_lastEntryDate = QDate();
 	} else if (!hasLeadingDateFrame(document()) && !m_retainedSources.isEmpty()) {
 		// Eviction consumed the oldest retained entry's same-date
-		// predecessors: re-insert the leading separator (the oldest
-		// retained entry's own render settings, exactly what its rebuild
-		// would emit) so the live document starts the way a rebuilt
-		// projection of the same sources starts.
+		// predecessors: the live document would start with a bare message
+		// frame where a rebuilt projection of the same sources starts with
+		// a date separator. Re-insert it (the oldest retained entry's own
+		// render settings, exactly what its rebuild would emit) so live
+		// eviction converges to the deterministic projection rule.
 		const QDate oldest = m_retainedSources.constFirst().timestamp.date();
 		QTextCursor tc(document());
 		tc.movePosition(QTextCursor::Start);

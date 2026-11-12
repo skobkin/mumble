@@ -22,6 +22,7 @@
 
 #include <QApplication>
 #include <QDateTime>
+#include <QLocale>
 #include <QSignalSpy>
 #include <QTextDocument>
 #include <QTextFrame>
@@ -159,6 +160,13 @@ private slots:
 	// repeated matching/non-matching rounds, an emptied view resets its
 	// date state, and a rebuild reproduces the live view exactly.
 	void evictedRenderedEntryLeavesNoGhost();
+
+	// The leading date separator of a projection is a function of its own
+	// sources: switching filters always yields the projection's own
+	// leading separator - including the same-date case where the replaced
+	// document's carried-over state used to suppress it - and
+	// back-and-forth switching rebuilds byte-identical projections.
+	void filterSwitchLeadingSeparatorDeterministic();
 
 private:
 	// LogConsoleView always owns a LogDocument (constructor, clearConsole,
@@ -663,9 +671,8 @@ void TestChatStream::evictedRenderedEntryLeavesNoGhost() {
 		QCOMPARE(view.document()->rootFrame()->childFrames().count(), 0);
 	}
 
-	// The emptied view reset its date state: the next render begins with
-	// the leading separator - the shape a rebuild of this single-entry
-	// store produces as well.
+	// The emptied view reset its date state: the next render satisfies the
+	// projection rule (leading separator for the oldest rendered entry).
 	presenter.appendEntry(makeEntry(marker(11), atTime(1, 20), directRouting(11)), true);
 	QCOMPARE(docOf(view)->entryCount(), 1);
 	QCOMPARE(view.document()->rootFrame()->childFrames().constFirst()->frameFormat().intProperty(
@@ -677,6 +684,92 @@ void TestChatStream::evictedRenderedEntryLeavesNoGhost() {
 	const QString liveText = view.document()->toPlainText();
 	presenter.setEntryCap(1); // cap unchanged; exercises the rebuild path
 	QCOMPARE(view.document()->toPlainText(), liveText);
+}
+
+void TestChatStream::filterSwitchLeadingSeparatorDeterministic() {
+	// Phase 1 - THE SAME-DATE REGRESSION: every projection's oldest
+	// rendered entry sits on day 3, so the replaced All document ALSO led
+	// with a [day 3] separator and its carried-over state used to suppress
+	// the Direct projection's own leading one.
+	{
+		LogConsoleView view;
+		ChatStreamModel store;
+		ChatStreamPresenter presenter(&view, &store);
+		presenter.setEpoch(1);
+		presenter.setEntryCap(10);
+		presenter.setSelectedChannel(1, coversRootOne());
+
+		const auto leadingIsDate = [&view]() {
+			return view.document()->rootFrame()->childFrames().constFirst()->frameFormat().intProperty(
+					   LogDocument::FrameRoleProperty)
+				   == static_cast< int >(LogDocument::DateFrameRole);
+		};
+		const auto plain = [&view]() { return view.document()->toPlainText(); };
+
+		presenter.appendEntry(makeEntry(marker(1), atTime(3, 1), channelRouting(1)), true);
+		presenter.appendEntry(makeEntry(marker(2), atTime(3, 2), directRouting(11)), true);
+		presenter.appendEntry(makeEntry(marker(3), atTime(3, 3), directRouting(12)), true);
+		QVERIFY(leadingIsDate());
+
+		presenter.setFilter(ChatStreamModel::Filter::Direct);
+		QVERIFY(leadingIsDate());
+		const QString directProjection = plain();
+		QCOMPARE(directProjection.count(QLatin1String("[Date changed to")), 1);
+		QVERIFY(!directProjection.contains(marker(1)));
+
+		presenter.setFilter(ChatStreamModel::Filter::SelectedChannel);
+		QVERIFY(leadingIsDate());
+		QVERIFY(plain().contains(marker(1)));
+		QVERIFY(!plain().contains(marker(2)));
+
+		// Back and forth: rebuilding the same projection is byte-identical
+		// - nothing depends on which filter was active before.
+		presenter.setFilter(ChatStreamModel::Filter::Direct);
+		QCOMPARE(plain(), directProjection);
+		presenter.setFilter(ChatStreamModel::Filter::SelectedChannel);
+		presenter.setFilter(ChatStreamModel::Filter::Direct);
+		QCOMPARE(plain(), directProjection);
+		presenter.setFilter(ChatStreamModel::Filter::All);
+		presenter.setFilter(ChatStreamModel::Filter::Direct);
+		QCOMPARE(plain(), directProjection);
+	}
+
+	// Phase 2 - entries spanning multiple dates: channel entries on day 1,
+	// directs on day 3. The All projection leads with [day 1]; the Direct
+	// projection's first retained entry is on day 3 and leads with its OWN
+	// [day 3] separator (never the previous projection's leading date,
+	// never the current date).
+	{
+		LogConsoleView view;
+		ChatStreamModel store;
+		ChatStreamPresenter presenter(&view, &store);
+		presenter.setEpoch(1);
+		presenter.setEntryCap(10);
+		presenter.setSelectedChannel(1, coversRootOne());
+
+		presenter.appendEntry(makeEntry(marker(1), atTime(1, 1), channelRouting(1)), true);
+		presenter.appendEntry(makeEntry(marker(2), atTime(3, 1), directRouting(11)), true);
+		presenter.appendEntry(makeEntry(marker(3), atTime(3, 2), directRouting(12)), true);
+		QVERIFY(view.document()->toPlainText().contains(
+			QString::fromLatin1("[Date changed to %1]")
+				.arg(QLocale().toString(atTime(1, 1).date(), QLocale::ShortFormat))));
+
+		presenter.setFilter(ChatStreamModel::Filter::Direct);
+		QCOMPARE(view.document()->rootFrame()->childFrames().constFirst()->frameFormat().intProperty(
+					 LogDocument::FrameRoleProperty),
+				 static_cast< int >(LogDocument::DateFrameRole));
+		QVERIFY(view.document()->toPlainText().contains(
+			QString::fromLatin1("[Date changed to %1]")
+				.arg(QLocale().toString(atTime(3, 1).date(), QLocale::ShortFormat))));
+		QCOMPARE(view.document()->toPlainText().count(QLatin1String("[Date changed to")), 1);
+		QVERIFY(!view.document()->toPlainText().contains(marker(1)));
+
+		// Switching back re-derives the All projection identically.
+		presenter.setFilter(ChatStreamModel::Filter::All);
+		QVERIFY(view.document()->toPlainText().contains(
+			QString::fromLatin1("[Date changed to %1]")
+				.arg(QLocale().toString(atTime(1, 1).date(), QLocale::ShortFormat))));
+	}
 }
 
 QTEST_MAIN(TestChatStream)
