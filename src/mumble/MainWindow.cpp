@@ -4524,17 +4524,20 @@ void MainWindow::updateChatTargetPresentation(const ChatTarget &target) {
 void MainWindow::updateChatBar() {
 	const ChatTarget target = currentChatTarget();
 
+	// The placeholder is deliberately generic: the explicit destination
+	// label above the composer (updateChatTargetPresentation) already names
+	// the resolved target, so repeating it here only adds noise. Only the
+	// disconnected state gets its own placeholder - the label is hidden
+	// then, so "Not connected" is the one thing the placeholder must say.
+	// The send path keeps re-resolving its target; nothing about routing or
+	// permissions changes with the placeholder.
 	switch (target.kind) {
 		case ChatTarget::Kind::Disconnected:
 			qteChat->setDefaultText(tr("<center>Not connected</center>"), true);
 			break;
 		case ChatTarget::Kind::Channel:
-			qteChat->setDefaultText(
-				tr("<center>Type message to channel '%1' here</center>").arg(target.displayName().toHtmlEscaped()));
-			break;
 		case ChatTarget::Kind::User:
-			qteChat->setDefaultText(
-				tr("<center>Type message to user '%1' here</center>").arg(target.displayName().toHtmlEscaped()));
+			qteChat->setDefaultText(tr("<center>Type a message…</center>"));
 			break;
 	}
 
