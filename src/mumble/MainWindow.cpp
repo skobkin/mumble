@@ -866,7 +866,7 @@ void MainWindow::updateConsoleBadges() {
 							  m_chatPresenter->filterBadge(ChatStreamModel::Filter::SelectedChannel));
 		panel->setFilterBadge(ChatPanel::ChatFilter::Direct,
 							  m_chatPresenter->filterBadge(ChatStreamModel::Filter::Direct));
-		panel->setSelectedChannelAvailable(m_chatPresenter->selectedChannel() != 0);
+		panel->setSelectedChannelAvailable(m_chatPresenter->selectedChannel().has_value());
 	}
 }
 
@@ -910,18 +910,24 @@ void MainWindow::updateChatFilterSelection() {
 	}
 	// Listener rows resolve to the listened channel (pmModel->getChannel,
 	// consistent with every other getChannel consumer).
-	Channel *c                   = pmModel->getChannel(qtvUsers->currentIndex());
-	const unsigned int channelId = (c && Global::get().uiSession != 0) ? c->iId : 0;
+	Channel *c = pmModel->getChannel(qtvUsers->currentIndex());
+	// 0 is the ROOT channel's real id, not a "none" sentinel: an explicit
+	// optional state distinguishes "nothing resolvable" (disconnected, no
+	// selection) from a selection of the root channel.
+	std::optional< unsigned int > selected;
+	if (c && Global::get().uiSession != 0) {
+		selected = c->iId;
+	}
 	m_chatPresenter->setSelectedChannel(
-		channelId, [this](unsigned int rootId, unsigned int channelId) { return chatTreeCovers(rootId, channelId); });
+		selected, [this](unsigned int rootId, unsigned int channelId) { return chatTreeCovers(rootId, channelId); });
 	updateConsoleBadges();
 }
 
 void MainWindow::onChatChannelRemoved(unsigned int channelId) {
 	// The tracked channel vanished: fall back to All (the store survives;
 	// only the id-based matching became invalid).
-	if (m_chatPresenter && m_chatPresenter->selectedChannel() == channelId) {
-		m_chatPresenter->setSelectedChannel(0, {});
+	if (m_chatPresenter && m_chatPresenter->selectedChannel() == std::optional< unsigned int >(channelId)) {
+		m_chatPresenter->setSelectedChannel(std::nullopt, {});
 	}
 }
 
@@ -991,6 +997,14 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event) {
 		} else if (watched == m_activityConsole) {
 			m_activityUnseen.clear();
 			updateConsoleBadges();
+		}
+	} else if (event->type() == QEvent::Hide && watched == m_chatConsole) {
+		// Mirror the hide into the presenter (tab switch, minimal mode,
+		// window hide - ancestor hides propagate Hide to the console too):
+		// rebuilds while the chat view is not shown must keep the unread
+		// badges intact instead of marking their entries seen.
+		if (m_chatPresenter) {
+			m_chatPresenter->setViewVisible(false);
 		}
 	}
 	return QMainWindow::eventFilter(watched, event);
@@ -4170,7 +4184,7 @@ void MainWindow::serverDisconnected(QAbstractSocket::SocketError err, QString re
 	// All (the store itself survives for the process lifetime - historical
 	// entries keep rendering under All/Direct with their captured names).
 	if (m_chatPresenter) {
-		m_chatPresenter->setSelectedChannel(0, {});
+		m_chatPresenter->setSelectedChannel(std::nullopt, {});
 	}
 
 #ifdef Q_OS_MACOS

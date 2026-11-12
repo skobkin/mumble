@@ -38,7 +38,12 @@ ChatStreamModel::FilterContext ChatStreamPresenter::contextFor(ChatStreamModel::
 	return ctx;
 }
 
-void ChatStreamPresenter::setSelectedChannel(unsigned int channelId, const ChatStreamModel::TreeCoverage &treeCovers) {
+void ChatStreamPresenter::setViewVisible(bool visible) {
+	m_viewVisible = visible;
+}
+
+void ChatStreamPresenter::setSelectedChannel(std::optional< unsigned int > channelId,
+											 const ChatStreamModel::TreeCoverage &treeCovers) {
 	// The resolver is always refreshed (it closes over live channel objects
 	// that may have been rebuilt under the same ids).
 	const bool changed = m_selectedChannel != channelId;
@@ -49,10 +54,12 @@ void ChatStreamPresenter::setSelectedChannel(unsigned int channelId, const ChatS
 		return;
 	}
 	if (m_filter == ChatStreamModel::Filter::SelectedChannel) {
-		if (channelId == 0) {
+		if (!channelId) {
 			// The tracked channel is gone (removed or disconnected): fall
 			// back to All rather than freeze an empty view. The store and
-			// its per-filter scrolls survive.
+			// its per-filter scrolls survive. Only a missing selection
+			// triggers this - id 0 is the root channel and a legitimate
+			// target.
 			setFilter(ChatStreamModel::Filter::All);
 		} else {
 			rebuildView();
@@ -71,7 +78,7 @@ void ChatStreamPresenter::setFilter(ChatStreamModel::Filter filter) {
 	}
 	// Selected Channel without a tracked channel behaves like no filter at
 	// all; the owner keeps the button disabled, this keeps the state honest.
-	if (filter == ChatStreamModel::Filter::SelectedChannel && m_selectedChannel == 0) {
+	if (filter == ChatStreamModel::Filter::SelectedChannel && !m_selectedChannel) {
 		return;
 	}
 
@@ -94,7 +101,9 @@ void ChatStreamPresenter::setFilter(ChatStreamModel::Filter filter) {
 void ChatStreamPresenter::appendEntry(ChatEntry entry, bool viewVisible) {
 	// Matching is decided against the active filter exactly as rendering is:
 	// a non-matching entry stays in the store (never lost), a matching one
-	// renders incrementally. Seen means actually displayed.
+	// renders incrementally. Seen means actually displayed. The passed
+	// visibility also refreshes the tracked one (rebuilds rely on it).
+	m_viewVisible       = viewVisible;
 	const bool matching = m_store->matches(entry, contextFor(m_filter));
 	entry.seen          = matching && viewVisible;
 
@@ -123,6 +132,9 @@ void ChatStreamPresenter::appendEntry(ChatEntry entry, bool viewVisible) {
 }
 
 void ChatStreamPresenter::markDisplayed() {
+	// The view just became visible (its Show event): everything rendered is
+	// seen now, and rebuilds may mark seen again until the next hide.
+	m_viewVisible = true;
 	m_store->markSeen(m_renderedIds);
 	emit stateChanged();
 }
@@ -158,6 +170,13 @@ void ChatStreamPresenter::rebuildView() {
 	m_view->rebuild(sources);
 	m_renderedIds = ids;
 	// Displaying a filter's matches is what makes them seen - this drains
-	// the badge of the filter being switched to (and only that one).
-	m_store->markSeen(ids);
+	// the badge of the filter being switched to (and only that one). But
+	// only if they were actually DISPLAYED: a rebuild while the chat view
+	// is hidden (Activity tab, minimal mode, hidden window - e.g. a
+	// settings-driven cap change or a tree-selection change) must keep the
+	// unread badges intact. markDisplayed() drains them when the view
+	// returns.
+	if (m_viewVisible) {
+		m_store->markSeen(ids);
+	}
 }

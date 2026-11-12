@@ -73,16 +73,17 @@ bool ChatStreamModel::matches(const ChatEntry &entry, const FilterContext &ctx) 
 			// epoch: after a reconnect the same ids mean different channels,
 			// so historical entries stay in All/Direct but never leak into
 			// (or hide from) the channel view under a new topology.
-			if (!entry.routing.present || entry.routing.epoch != ctx.currentEpoch || ctx.selectedChannelId == 0) {
+			if (!entry.routing.present || entry.routing.epoch != ctx.currentEpoch || !ctx.selectedChannelId) {
 				return false;
 			}
+			const unsigned int selectedId = *ctx.selectedChannelId;
 			for (unsigned int channelId : entry.routing.channelIds) {
-				if (channelId == ctx.selectedChannelId) {
+				if (channelId == selectedId) {
 					return true;
 				}
 			}
 			for (unsigned int rootId : entry.routing.treeIds) {
-				if (ctx.treeCovers && ctx.treeCovers(rootId, ctx.selectedChannelId)) {
+				if (ctx.treeCovers && ctx.treeCovers(rootId, selectedId)) {
 					return true;
 				}
 			}

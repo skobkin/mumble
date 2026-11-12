@@ -9,6 +9,8 @@
 #include "ChatStreamModel.h"
 #include "widgets/LogConsoleView.h"
 
+#include <optional>
+
 #include <QtCore/QMap>
 #include <QtCore/QObject>
 #include <QtCore/QVector>
@@ -44,15 +46,16 @@ public:
 	/// The connection epoch id-based matching is currently valid in (bumped
 	/// by the owner at every connection lifecycle start).
 	void setEpoch(quint64 epoch);
-	/// The currently tracked channel (0 = none; Selected Channel is
-	/// unavailable then).
-	unsigned int selectedChannel() const { return m_selectedChannel; }
+	/// The currently tracked channel (nullopt = none; Selected Channel is
+	/// unavailable then). An explicit optional state: 0 is the root
+	/// channel's real id and a legitimate target.
+	std::optional< unsigned int > selectedChannel() const { return m_selectedChannel; }
 	/// The channel the Selected Channel filter tracks plus the live-subtree
-	/// resolver used for tree-targeted entries. Zero id means no selection:
-	/// the Selected Channel filter matches nothing and an active one falls
-	/// back to All (removed channel, disconnect). Re-setting the same id only
-	/// refreshes the resolver.
-	void setSelectedChannel(unsigned int channelId, const ChatStreamModel::TreeCoverage &treeCovers);
+	/// resolver used for tree-targeted entries. No selection (nullopt)
+	/// means the Selected Channel filter matches nothing and an active one
+	/// falls back to All (removed channel, disconnect). Re-setting the same
+	/// id only refreshes the resolver.
+	void setSelectedChannel(std::optional< unsigned int > channelId, const ChatStreamModel::TreeCoverage &treeCovers);
 	/// Applies the entry cap to the store (iMaxLogBlocks as the chat-side
 	/// budget) and rebuilds the view: a lowered cap takes effect immediately,
 	/// not on the next append.
@@ -67,11 +70,21 @@ public:
 	/// One accepted chat entry (HTML + metadata atomically): stores it,
 	/// evicts in lockstep, renders iff it matches the active filter.
 	/// \p viewVisible is whether the chat view is currently shown to the
-	/// user (a matching live append while visible is seen immediately).
+	/// user (a matching live append while visible is seen immediately);
+	/// it also refreshes the tracked visibility (setViewVisible).
 	void appendEntry(ChatEntry entry, bool viewVisible);
 
+	/// Whether the chat view is currently shown to the user. Rebuilds only
+	/// mark their displayed matches seen while this is set: a background
+	/// rebuild (settings-driven cap change, tree selection change while the
+	/// Activity tab is active, minimal mode, hidden window) must keep the
+	/// unread badges intact. MainWindow mirrors the view's Hide events
+	/// here; Show flows through markDisplayed().
+	void setViewVisible(bool visible);
+
 	/// The rendered entries just became visible to the user (tab switch,
-	/// return from minimal mode, window un-hide): they are seen now.
+	/// return from minimal mode, window un-hide): they are seen now, and
+	/// the view counts as visible until the next setViewVisible(false).
 	void markDisplayed();
 
 	/// Store-aware Clear: removes the ACTIVE filter's entries from the store
@@ -96,9 +109,12 @@ private:
 	LogConsoleView *m_view;
 	ChatStreamModel *m_store;
 	ChatStreamModel::Filter m_filter = ChatStreamModel::Filter::All;
-	unsigned int m_selectedChannel   = 0;
-	quint64 m_epoch                  = 0;
+	std::optional< unsigned int > m_selectedChannel;
+	quint64 m_epoch = 0;
 	ChatStreamModel::TreeCoverage m_treeCovers;
+	/// Whether the chat view is currently shown to the user (see
+	/// setViewVisible); gates the markSeen of rebuilds.
+	bool m_viewVisible = false;
 	/// Ids of the currently rendered entries, in render order (= store order
 	/// restricted to matches). Evicted-and-rendered entries are always a
 	/// prefix of this list.

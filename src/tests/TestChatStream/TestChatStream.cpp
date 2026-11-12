@@ -24,6 +24,9 @@
 #include <QDateTime>
 #include <QSignalSpy>
 #include <QTextDocument>
+#include <QTextFrame>
+
+#include <optional>
 
 namespace {
 
@@ -83,6 +86,13 @@ ChatStreamModel::TreeCoverage coversRootOne() {
 	return [](unsigned int rootId, unsigned int channelId) { return rootId == 1 && channelId == 5; };
 }
 
+/// A subtree resolver for the ROOT channel (id 0 - a real channel, not a
+/// sentinel): it covers itself and channel 5 as its child.
+ChatStreamModel::TreeCoverage coversRootZero() {
+	return
+		[](unsigned int rootId, unsigned int channelId) { return rootId == 0 && (channelId == 0 || channelId == 5); };
+}
+
 } // namespace
 
 class TestChatStream : public QObject {
@@ -134,8 +144,14 @@ private slots:
 	// Losing the tracked channel (removed or disconnected) while Selected
 	// Channel is active falls back to All; re-activating Selected Channel
 	// without a selection is refused; re-setting the same selection only
-	// refreshes the resolver.
+	// refreshes the resolver. The root channel (id 0) is a real target.
 	void selectedChannelLifecycle();
+
+	// Rebuilds while the chat view is hidden (background configuration
+	// changes, selection changes while the Activity tab is active) must
+	// keep the unread badges intact; markDisplayed drains them when the
+	// view returns.
+	void backgroundRebuildsKeepUnseen();
 
 private:
 	// LogConsoleView always owns a LogDocument (constructor, clearConsole,
@@ -263,9 +279,23 @@ void TestChatStream::filterMatchingMatrix() {
 	// A different connection epoch: the ids mean different channels there.
 	QVERIFY(!store.matches(makeEntry(marker(9), atTime(1, 8), channelRouting(5, 2)), ctx));
 
-	// No tracked channel: the filter matches nothing.
-	ctx.selectedChannelId = 0;
+	// 0 is the ROOT channel's real id, not a "none" sentinel: messages
+	// addressed to the root channel, or tree-scoped to it, match a
+	// root-channel selection.
+	ctx.selectedChannelId = std::optional< unsigned int >(0);
+	ctx.treeCovers        = coversRootZero();
+	QVERIFY(store.matches(makeEntry(marker(10), atTime(1, 9), channelRouting(0)), ctx));
+	QVERIFY(store.matches(makeEntry(marker(11), atTime(1, 10), treeRouting(0)), ctx));
+	// ...and a root-tree message also reaches a child channel's view (the
+	// root covers the child).
+	ctx.selectedChannelId = std::optional< unsigned int >(5);
+	QVERIFY(store.matches(makeEntry(marker(11), atTime(1, 10), treeRouting(0)), ctx));
+
+	// No tracked channel is the explicit optional state, distinct from id 0:
+	// the filter matches nothing - not even root-addressed entries.
+	ctx.selectedChannelId = std::nullopt;
 	QVERIFY(!store.matches(chan5, ctx));
+	QVERIFY(!store.matches(makeEntry(marker(10), atTime(1, 9), channelRouting(0)), ctx));
 }
 
 void TestChatStream::epochScopedSelectionAcrossReconnects() {
@@ -492,9 +522,9 @@ void TestChatStream::selectedChannelLifecycle() {
 
 	// Losing the tracked channel (removed or disconnected) while the filter
 	// is active falls back to All rather than freeze an empty projection.
-	presenter.setSelectedChannel(0, {});
+	presenter.setSelectedChannel(std::nullopt, {});
 	QCOMPARE(presenter.filter(), ChatStreamModel::Filter::All);
-	QCOMPARE(presenter.selectedChannel(), 0u);
+	QVERIFY(!presenter.selectedChannel().has_value());
 	QCOMPARE(docOf(view)->entryCount(), 2);
 	QVERIFY(view.document()->toPlainText().contains(marker(2)));
 
@@ -517,6 +547,79 @@ void TestChatStream::selectedChannelLifecycle() {
 	presenter.setSelectedChannel(6, coversRootOne());
 	QCOMPARE(stateSpy.count(), 0);
 	QCOMPARE(presenter.filter(), ChatStreamModel::Filter::SelectedChannel);
+
+	// The ROOT channel (id 0) is a real channel, not the "none" sentinel:
+	// selecting it keeps Selected Channel active (no fallback) and a
+	// message addressed to the root renders in its view. Losing it falls
+	// back again.
+	presenter.setSelectedChannel(std::optional< unsigned int >(0), coversRootZero());
+	QCOMPARE(presenter.filter(), ChatStreamModel::Filter::SelectedChannel);
+	presenter.appendEntry(makeEntry(marker(3), atTime(1, 2), channelRouting(0)), true);
+	QCOMPARE(docOf(view)->entryCount(), 1);
+	QVERIFY(view.document()->toPlainText().contains(marker(3)));
+
+	presenter.setSelectedChannel(std::nullopt, {});
+	QCOMPARE(presenter.filter(), ChatStreamModel::Filter::All);
+	QVERIFY(!presenter.selectedChannel().has_value());
+	// Re-activating without a selection stays refused afterwards, too.
+	presenter.setFilter(ChatStreamModel::Filter::SelectedChannel);
+	QCOMPARE(presenter.filter(), ChatStreamModel::Filter::All);
+}
+
+void TestChatStream::backgroundRebuildsKeepUnseen() {
+	LogConsoleView view;
+	ChatStreamModel store;
+	ChatStreamPresenter presenter(&view, &store);
+	presenter.setEpoch(1);
+	presenter.setSelectedChannel(5, coversRootOne());
+
+	// Two channel entries arrive while the view is visible: displayed, seen.
+	presenter.appendEntry(makeEntry(marker(1), atTime(1, 0), channelRouting(5)), true);
+	presenter.appendEntry(makeEntry(marker(2), atTime(1, 1), channelRouting(5)), true);
+	// A private arrives while the view is NOT visible: it renders into the
+	// projection (All matches it) but nothing displays it - unseen.
+	presenter.appendEntry(makeEntry(marker(3), atTime(1, 2), directRouting(9)), false);
+	QCOMPARE(presenter.chatTabBadge(), 1);
+
+	// The presenter now counts the view as hidden (the last append already
+	// carried viewVisible=false; setViewVisible mirrors tab switches,
+	// minimal mode, hidden windows): every rebuild it performs must leave
+	// the unseen state alone.
+
+	// A selection change while Selected Channel is active rebuilds (tree
+	// selection changed with the tab inactive): still unseen.
+	presenter.setFilter(ChatStreamModel::Filter::SelectedChannel);
+	presenter.setSelectedChannel(6, coversRootOne());
+	QCOMPARE(presenter.chatTabBadge(), 1);
+	QCOMPARE(presenter.filterBadge(ChatStreamModel::Filter::All), 1);
+	QCOMPARE(presenter.filterBadge(ChatStreamModel::Filter::Direct), 1);
+	// A filter round-trip rebuilds twice more: still unseen.
+	presenter.setFilter(ChatStreamModel::Filter::All);
+	presenter.setFilter(ChatStreamModel::Filter::SelectedChannel);
+	presenter.setFilter(ChatStreamModel::Filter::All);
+	QCOMPARE(presenter.chatTabBadge(), 1);
+
+	// A background configuration change (iMaxLogBlocks lowered) trims the
+	// store and rebuilds: still unseen.
+	presenter.setEntryCap(1);
+	QCOMPARE(store.size(), 1);
+	QCOMPARE(presenter.chatTabBadge(), 1);
+	QVERIFY(view.document()->toPlainText().contains(marker(3)));
+
+	// Showing the view drains it: what is rendered is seen now.
+	presenter.markDisplayed();
+	QCOMPARE(presenter.chatTabBadge(), 0);
+
+	// And the gate is live again: a matching entry arriving while the view
+	// is hidden (the store cap evicts the survivor) stays unseen through
+	// hidden rebuilds until the view returns.
+	presenter.appendEntry(makeEntry(marker(4), atTime(1, 3), directRouting(9)), false);
+	QCOMPARE(presenter.chatTabBadge(), 1);
+	presenter.setFilter(ChatStreamModel::Filter::SelectedChannel);
+	presenter.setFilter(ChatStreamModel::Filter::All);
+	QCOMPARE(presenter.chatTabBadge(), 1);
+	presenter.markDisplayed();
+	QCOMPARE(presenter.chatTabBadge(), 0);
 }
 
 QTEST_MAIN(TestChatStream)

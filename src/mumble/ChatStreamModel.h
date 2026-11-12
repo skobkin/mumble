@@ -10,6 +10,7 @@
 #include "widgets/LogConsoleView.h"
 
 #include <functional>
+#include <optional>
 
 #include <QtCore/QDateTime>
 #include <QtCore/QObject>
@@ -63,9 +64,11 @@ public:
 	/// Everything a filter decision needs besides the entry itself.
 	struct FilterContext {
 		Filter filter = Filter::All;
-		/// The channel the Selected Channel filter tracks (0 = none; the
-		/// filter matches nothing then).
-		unsigned int selectedChannelId = 0;
+		/// The channel the Selected Channel filter tracks (nullopt = none;
+		/// the filter matches nothing then). This is an explicit optional
+		/// state rather than a 0 sentinel because 0 is the root channel's
+		/// real id and a legitimate Selected Channel target.
+		std::optional< unsigned int > selectedChannelId;
 		/// The connection epoch id-based matching is valid in.
 		quint64 currentEpoch = 0;
 		/// Subtree resolver; may be null for Topology-free queries.
