@@ -31,8 +31,17 @@ Stage 4's checklist (`stage4-manual-checklist.md`) remains a prerequisite.
 
 ## Filters
 
-- [ ] All / Selected Channel / Direct behave as labeled; the row is visible
-      only while the Chat tab is active.
+- [ ] The compact dropdown control sits right-aligned in the Chat/Activity
+      switch row and is visible only while the Chat tab is active; its label
+      names the ACTIVE filter; All / Selected Channel / Direct behave as
+      labeled in the menu.
+- [ ] With no channel tracked (e.g. fresh connect, nothing selected), the
+      Selected Channel menu option is disabled; triggering it (mouse or
+      keyboard) does nothing — the current filter is never silently swapped
+      for another one.
+- [ ] Opening the dropdown (including by keyboard Space on the control) does
+      NOT mark any message seen — badge counts are unchanged while the menu
+      is open.
 - [ ] Selecting a channel in the tree does NOT activate the filter by
       itself; activating Selected Channel tracks the live selection from
       then on.
@@ -49,7 +58,9 @@ Stage 4's checklist (`stage4-manual-checklist.md`) remains a prerequisite.
 
 - [ ] A private message arriving while Selected Channel is active produces NO
       extra notification (highlight/balloon behavior identical to the
-      combined-log client), but the All and Direct filter badges increment.
+      combined-log client), but the All and Direct menu options show their
+      unread counts and the dropdown control shows the hidden-unread count
+      (e.g. `Selected Channel (3)`).
 - [ ] Switching to Direct displays the entry and drains its badge; the Chat
       tab badge (visible while Activity is active) tracks unseen entries.
 - [ ] The Activity badge clears on showing the tab; unseen
@@ -69,6 +80,9 @@ Stage 4's checklist (`stage4-manual-checklist.md`) remains a prerequisite.
 
 ## Composer target and sends
 
+- [ ] The composer placeholder is the generic `Type a message…` in both the
+      channel and user states; only the disconnected state shows `Not
+      connected` (the destination label is hidden then).
 - [ ] The destination label above the input always names the current target
       (channel with full path tooltip / user), regardless of active tab and
       filter; it disappears when disconnected.
@@ -95,9 +109,10 @@ Stage 4's checklist (`stage4-manual-checklist.md`) remains a prerequisite.
 - [ ] Tab switches never touch documents, scroll positions or selections;
       minimal mode hides the whole panel and both badges resurface on
       return.
-- [ ] Keyboard: Tab reaches the switch row, the active console, the whole
-      filter row (all three buttons — never autoExclusive-stripped) and the
-      composer; F6 cycles {active console, composer, tree}.
+- [ ] Keyboard: Tab reaches the switch row (Chat, Activity, then the filter
+      dropdown control), the active console and the composer; Space or Enter
+      on the dropdown control opens its menu and the arrow keys / mnemonics
+      pick an option; F6 cycles {active console, composer, tree}.
 - [ ] Ctrl+Shift+L toggles Chat/Activity.
 - [ ] Live theme switch restyles BOTH consoles.
 - [ ] The persisted tab survives restart; a revision-1 sidecar from a
@@ -110,9 +125,11 @@ Stage 4's checklist (`stage4-manual-checklist.md`) remains a prerequisite.
 
 ## Accessibility and desktop pass
 
-- [ ] Screen reader: switch/filter buttons announce their label AND unread
-      count; the activity warning state is announced; the target label is
+- [ ] Screen reader: the tab buttons and the filter dropdown control
+      announce their label AND unread count (the control names the active
+      filter and the hidden-unread count); menu options announce their own
+      counts; the activity warning state is announced; the target label is
       read with the composer context.
-- [ ] Large fonts, RTL locale and narrow window widths: switch/filter rows
-      and the target label stay usable; nothing overflows or truncates
-      illegibly.
+- [ ] Large fonts, RTL locale and narrow window widths: the switch row with
+      the dropdown control and the target label stay usable; the control
+      never overlaps the tab buttons or truncates illegibly.

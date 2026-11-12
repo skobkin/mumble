@@ -269,10 +269,14 @@ and all five outgoing echo sites; the epoch comes from an atomic
 delivery time). Classification mirrors `msgTextMessage` exactly:
 tree > channel > direct.
 
-- Filters **All / Selected Channel / Direct** (a checkable `QToolButton` row,
-  visible only while Chat is active; deliberately NOT `autoExclusive` — Qt's
-  radio-group semantics strip TabFocus from every sibling button, breaking
-  keyboard reachability; exactly-one-checked is enforced manually).
+- Filters **All / Selected Channel / Direct** via a compact dropdown control
+  (`QToolButton` + `QMenu` with checkable options) right-aligned in the
+  Chat/Activity switch row, visible only while Chat is active. The control's
+  label names the active filter. Exactly-one-checked among the menu options
+  is enforced in `ChatPanel::setChatFilter`; an unavailable Selected Channel
+  (no tracked channel) is a **disabled menu option**, and programmatic
+  requests for it are **refused** (the current selection is kept) — never
+  silently swapped for another filter.
 - **Epoch-scoped matching:** channel/session ids are per-connection; id-based
   matching (Selected Channel) is valid only within the entry's connection
   epoch, with tree-root coverage resolved against the live channel tree.
@@ -291,10 +295,14 @@ tree > channel > direct.
   Clearing Activity clears only the activity document.
 - **Seen-derived badges:** an entry is seen when actually displayed (matching
   live append while the chat view is visible, or display during a rebuild).
-  The Chat tab badge counts unseen entries; each filter button shows the
-  unseen count matching that filter — all derived from the store's `seen`
-  flags, no parallel counters. Filters never change highlight/balloon/sound/
-  TTS behavior; a filter-hidden entry is surfaced by badges, not notifications.
+  The Chat tab badge counts unseen entries; each dropdown menu option shows
+  the unseen count matching its filter, and the dropdown control itself shows
+  how many unseen messages the ACTIVE filter hides (unseen total minus the
+  active filter's unseen count) — all derived from the store's `seen` flags,
+  no parallel counters. Opening the dropdown is presentation-only and never
+  marks anything seen. All counts use the `99+` cap. Filters never change
+  highlight/balloon/sound/TTS behavior; a filter-hidden entry is surfaced by
+  badges, not notifications.
 - Per-filter scroll positions are saved and restored across rebuilds; a filter
   visited for the first time starts at the bottom. Losing the tracked channel
   (removed or disconnected) falls back to All. Selecting a channel in the tree
@@ -752,15 +760,21 @@ editing MainWindow/Log/ConfigDialog concurrently; hand off at reviewed commits.
   lockstep store↔document eviction, store-aware Clear, seen-derived badges
   (`TestChatStream`); (6) shared `ChatTarget` resolver (placeholder/send/
   enablement; re-resolve on send; `TestChatTarget`); (7) explicit composer
-  target label; (8) this documentation + the stage-5 manual checklist.
+  target label; (8) chat-panel UX simplification — the filter row folded
+  into a compact dropdown control in the switch row (store-derived hidden-
+  unread badge on the control and per-option counts, unavailable-option
+  refusal semantics, generic `Type a message...` composer placeholder; the
+  destination stays in the explicit label); (9) this documentation + the
+  stage-5 manual checklist.
 - **Automated coverage:** `TestLogPresentation` (renderer parity, sink
   contract incl. cross-thread queued routing metadata, policy gating,
   deferred replay), `TestLogDocument` (eviction/resource lifecycle/compaction
   incl. the reproducing corruption gate), `TestChatStream` (store caps,
   classification parity, epoch isolation, badges, lockstep eviction
   equivalence, Clear matrix), `TestChatTarget` (full decision matrix),
-  `TestMainWindowShell` (switch/filter rows, badges, visibility matrix,
-  keyboard chains, target label), `TestUiStateStore` (revision-2 migration).
+  `TestMainWindowShell` (switch row + filter dropdown, badges, visibility
+  matrix, keyboard chains, target label), `TestUiStateStore` (revision-2
+  migration).
 - **Still manual (see `stage5-manual-checklist.md`):** two-client delivery +
   filters on a real server, permission-denied flows, reconnect ordering with
   filters active, live theme restyle, large-font/RTL/narrow desktop pass,
