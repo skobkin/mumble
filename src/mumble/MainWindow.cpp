@@ -113,6 +113,34 @@ OpenURLEvent::OpenURLEvent(QUrl u) : QEvent(static_cast< QEvent::Type >(OU_QEVEN
 	url = u;
 }
 
+namespace {
+/// The presentation mirror between ChatPanel's filter enum and the chat
+/// stream store's one (same order, distinct types).
+ChatStreamModel::Filter toStreamFilter(ChatPanel::ChatFilter filter) {
+	switch (filter) {
+		case ChatPanel::ChatFilter::All:
+			return ChatStreamModel::Filter::All;
+		case ChatPanel::ChatFilter::SelectedChannel:
+			return ChatStreamModel::Filter::SelectedChannel;
+		case ChatPanel::ChatFilter::Direct:
+			return ChatStreamModel::Filter::Direct;
+	}
+	return ChatStreamModel::Filter::All;
+}
+
+ChatPanel::ChatFilter toPanelFilter(ChatStreamModel::Filter filter) {
+	switch (filter) {
+		case ChatStreamModel::Filter::All:
+			return ChatPanel::ChatFilter::All;
+		case ChatStreamModel::Filter::SelectedChannel:
+			return ChatPanel::ChatFilter::SelectedChannel;
+		case ChatStreamModel::Filter::Direct:
+			return ChatPanel::ChatFilter::Direct;
+	}
+	return ChatPanel::ChatFilter::All;
+}
+} // namespace
+
 MainWindow::MainWindow(QWidget *p)
 	: QMainWindow(p), m_localVolumeLabel(make_qt_unique< MenuLabel >(tr("Local Volume Adjustment:"), this)),
 	  m_userLocalVolumeSlider(make_qt_unique< UserLocalVolumeSlider >(this)),
@@ -867,6 +895,11 @@ void MainWindow::updateConsoleBadges() {
 		panel->setFilterBadge(ChatPanel::ChatFilter::Direct,
 							  m_chatPresenter->filterBadge(ChatStreamModel::Filter::Direct));
 		panel->setSelectedChannelAvailable(m_chatPresenter->selectedChannel().has_value());
+		// The compact filter control shows how many unseen messages the
+		// active filter hides - store-derived (unseen total minus the
+		// active filter's unseen count), no parallel counters.
+		panel->setFilterHiddenUnread(m_chatPresenter->chatTabBadge()
+									 - m_chatPresenter->filterBadge(toStreamFilter(panel->chatFilter())));
 	}
 }
 
@@ -892,40 +925,28 @@ void MainWindow::onChatFilterChanged(ChatPanel::ChatFilter filter) {
 	if (!m_chatPresenter) {
 		return;
 	}
-	const ChatStreamModel::Filter mapped = filter == ChatPanel::ChatFilter::All ? ChatStreamModel::Filter::All
-										   : filter == ChatPanel::ChatFilter::SelectedChannel
-											   ? ChatStreamModel::Filter::SelectedChannel
-											   : ChatStreamModel::Filter::Direct;
-	m_chatPresenter->setFilter(mapped);
+	m_chatPresenter->setFilter(toStreamFilter(filter));
 	updateConsoleBadges();
 }
 
 void MainWindow::onChatStreamStateChanged() {
-	// Badges first: they also refresh the Selected Channel button's
-	// availability, which the filter mirror below relies on (setChatFilter
-	// coerces Selected Channel to All while the button is disabled).
+	// Badges first: they refresh the filter options' unread counts and the
+	// Selected Channel availability alongside the mirror below (the mirror
+	// can never request an unavailable Selected Channel - the presenter
+	// only holds that filter while a channel is tracked - and setChatFilter
+	// refuses it anyway instead of swapping filters silently).
 	updateConsoleBadges();
 	if (!m_shell) {
 		return;
 	}
 	// The presenter can switch its filter autonomously (Selected Channel
 	// falls back to All when the tracked channel is removed or the
-	// connection drops): mirror it into the buttons so the checked state
-	// can never claim a projection that is not displayed - across
-	// disconnects, reconnects and reselections alike. Both sides ignore
-	// no-op updates (setChatFilter emits only on a change, and the
+	// connection drops): mirror it into the dropdown control so the
+	// selected option can never claim a projection that is not displayed -
+	// across disconnects, reconnects and reselections alike. Both sides
+	// ignore no-op updates (setChatFilter emits only on a change, and the
 	// presenter refuses no-op filter updates), so the mirror cannot loop.
-	switch (m_chatPresenter->filter()) {
-		case ChatStreamModel::Filter::All:
-			m_shell->chatPanel()->setChatFilter(ChatPanel::ChatFilter::All);
-			break;
-		case ChatStreamModel::Filter::SelectedChannel:
-			m_shell->chatPanel()->setChatFilter(ChatPanel::ChatFilter::SelectedChannel);
-			break;
-		case ChatStreamModel::Filter::Direct:
-			m_shell->chatPanel()->setChatFilter(ChatPanel::ChatFilter::Direct);
-			break;
-	}
+	m_shell->chatPanel()->setChatFilter(toPanelFilter(m_chatPresenter->filter()));
 }
 
 void MainWindow::updateChatFilterSelection() {

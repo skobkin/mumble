@@ -8,8 +8,10 @@
 #include "CustomElements.h"
 #include "widgets/LogConsoleView.h"
 
+#include <QAction>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QMenu>
 #include <QStackedWidget>
 #include <QStyle>
 #include <QToolButton>
@@ -29,9 +31,8 @@ ChatPanel::ChatPanel(LogConsoleView *chatConsole, LogConsoleView *activityConsol
 					 QWidget *parent)
 	: QWidget(parent), m_chatConsole(chatConsole), m_activityConsole(activityConsole), m_chatInput(chatInput),
 	  m_chatTabButton(new QToolButton(this)), m_activityTabButton(new QToolButton(this)),
-	  m_stack(new QStackedWidget(this)), m_allFilterButton(new QToolButton(this)),
-	  m_selectedChannelFilterButton(new QToolButton(this)), m_directFilterButton(new QToolButton(this)),
-	  m_filterRow(new QWidget(this)) {
+	  m_stack(new QStackedWidget(this)), m_filterButton(new QToolButton(this)), m_filterMenu(new QMenu(m_filterButton)),
+	  m_targetLabel(new QLabel(this)) {
 	m_chatTabButton->setObjectName(QLatin1String("chatTabButton"));
 	m_activityTabButton->setObjectName(QLatin1String("activityTabButton"));
 	m_chatTabButton->setText(tr("&Chat"));
@@ -49,22 +50,38 @@ ChatPanel::ChatPanel(LogConsoleView *chatConsole, LogConsoleView *activityConsol
 	}
 	m_chatTabButton->setChecked(true);
 
-	// Chat-stream filter row. Same no-autoExclusive rule as the tab row, for
-	// the same keyboard-reachability reason; exactly-one-checked is enforced
-	// in setChatFilter.
-	m_allFilterButton->setObjectName(QLatin1String("allFilterButton"));
-	m_selectedChannelFilterButton->setObjectName(QLatin1String("selectedChannelFilterButton"));
-	m_directFilterButton->setObjectName(QLatin1String("directFilterButton"));
-	m_allFilterButton->setText(tr("&All"));
-	m_selectedChannelFilterButton->setText(tr("Selected &Channel"));
-	m_directFilterButton->setText(tr("&Direct"));
-	for (QToolButton *button : { m_allFilterButton, m_selectedChannelFilterButton, m_directFilterButton }) {
-		button->setCheckable(true);
-		button->setToolButtonStyle(Qt::ToolButtonTextOnly);
-		button->setAccessibleName(strippedMnemonic(button->text()));
-		button->setToolTip(tr("Filter which chat messages are shown"));
+	// The compact chat-stream filter control, right-aligned in the switch
+	// row (the former bottom All/Selected Channel/Direct button row is gone;
+	// the dropdown keeps the filtering semantics, the per-filter unread
+	// counts and the unavailable-state handling without a second row).
+	m_filterButton->setObjectName(QLatin1String("filterButton"));
+	m_filterButton->setToolButtonStyle(Qt::ToolButtonTextOnly);
+	m_filterButton->setToolTip(tr("Filter which chat messages are shown"));
+	m_filterButton->setAccessibleDescription(tr("Choose which chat messages are displayed"));
+	m_filterButton->setPopupMode(QToolButton::InstantPopup);
+	m_filterButton->setMenu(m_filterMenu);
+	// Checkable options keep the active filter visible and announced inside
+	// the menu; an unavailable option stays visibly disabled - it is never
+	// silently swapped for another filter.
+	m_filterActions[0] = m_filterMenu->addAction(filterLabel(ChatFilter::All));
+	m_filterActions[1] = m_filterMenu->addAction(filterLabel(ChatFilter::SelectedChannel));
+	m_filterActions[2] = m_filterMenu->addAction(filterLabel(ChatFilter::Direct));
+	m_filterActions[0]->setObjectName(QLatin1String("filterActionAll"));
+	m_filterActions[1]->setObjectName(QLatin1String("filterActionSelectedChannel"));
+	m_filterActions[2]->setObjectName(QLatin1String("filterActionDirect"));
+	for (QAction *action : m_filterActions) {
+		action->setCheckable(true);
 	}
-	m_allFilterButton->setChecked(true);
+	m_filterActions[0]->setChecked(true);
+	// The control's label composes the active filter and the (empty)
+	// hidden-unread badge.
+	updateFilterButtonDisplay();
+
+	// Filter selection follows the menu options; setChatFilter re-checks
+	// them.
+	connect(m_filterActions[0], &QAction::triggered, this, [this]() { setChatFilter(ChatFilter::All); });
+	connect(m_filterActions[1], &QAction::triggered, this, [this]() { setChatFilter(ChatFilter::SelectedChannel); });
+	connect(m_filterActions[2], &QAction::triggered, this, [this]() { setChatFilter(ChatFilter::Direct); });
 
 	m_stack->addWidget(m_chatConsole);
 	m_stack->addWidget(m_activityConsole);
@@ -77,12 +94,6 @@ ChatPanel::ChatPanel(LogConsoleView *chatConsole, LogConsoleView *activityConsol
 	connect(m_chatTabButton, &QToolButton::clicked, this, [this]() { setActiveConsole(m_chatConsole); });
 	connect(m_activityTabButton, &QToolButton::clicked, this, [this]() { setActiveConsole(m_activityConsole); });
 
-	// Filter selection follows the buttons; setChatFilter re-checks them.
-	connect(m_allFilterButton, &QToolButton::clicked, this, [this]() { setChatFilter(ChatFilter::All); });
-	connect(m_selectedChannelFilterButton, &QToolButton::clicked, this,
-			[this]() { setChatFilter(ChatFilter::SelectedChannel); });
-	connect(m_directFilterButton, &QToolButton::clicked, this, [this]() { setChatFilter(ChatFilter::Direct); });
-
 	QWidget *switchRow     = new QWidget(this);
 	QHBoxLayout *rowLayout = new QHBoxLayout(switchRow);
 	rowLayout->setContentsMargins(0, 0, 0, 0);
@@ -90,19 +101,11 @@ ChatPanel::ChatPanel(LogConsoleView *chatConsole, LogConsoleView *activityConsol
 	rowLayout->addWidget(m_chatTabButton);
 	rowLayout->addWidget(m_activityTabButton);
 	rowLayout->addStretch(1);
-
-	QHBoxLayout *filterLayout = new QHBoxLayout(m_filterRow);
-	filterLayout->setContentsMargins(0, 0, 0, 0);
-	filterLayout->setSpacing(0);
-	filterLayout->addWidget(m_allFilterButton);
-	filterLayout->addWidget(m_selectedChannelFilterButton);
-	filterLayout->addWidget(m_directFilterButton);
-	filterLayout->addStretch(1);
+	rowLayout->addWidget(m_filterButton);
 
 	// The composer's explicit destination. Hidden until MainWindow hands it
 	// a target (setTargetDisplay); a label is not focusable, so it never
 	// enters the keyboard chain.
-	m_targetLabel = new QLabel(this);
 	m_targetLabel->setObjectName(QLatin1String("targetLabel"));
 	m_targetLabel->setTextFormat(Qt::RichText);
 	m_targetLabel->setTextInteractionFlags(Qt::NoTextInteraction);
@@ -113,13 +116,12 @@ ChatPanel::ChatPanel(LogConsoleView *chatConsole, LogConsoleView *activityConsol
 	layout->setSpacing(0);
 	layout->addWidget(switchRow, 0);
 	layout->addWidget(m_stack, 1);
-	layout->addWidget(m_filterRow, 0);
 	layout->addWidget(m_targetLabel, 0);
 	layout->addWidget(m_chatInput, 0);
-	// The filter row belongs to the chat projection (the initial tab), so
-	// it starts visible: setActiveConsole(chatConsole) is a no-op on the
-	// already-current page and must not need to re-show it. Switching to
-	// the Activity tab hides the row - that log is server-wide, not a chat
+	// The filter control belongs to the chat projection (the initial tab),
+	// so it starts visible: setActiveConsole(chatConsole) is a no-op on the
+	// already-current page and must not need to re-show it. Switching to the
+	// Activity tab hides the control - that log is server-wide, not a chat
 	// projection.
 
 	// Reparenting a widget that was detached from its dock via
@@ -166,8 +168,8 @@ void ChatPanel::setActiveConsole(LogConsoleView *view) {
 	}
 	// Swapping the stacked page hides one view and shows the other; nothing
 	// about the documents, their scroll positions or their selections is
-	// touched. The filter row belongs to the Chat tab alone.
-	m_filterRow->setVisible(view == m_chatConsole);
+	// touched. The filter control belongs to the Chat tab alone.
+	m_filterButton->setVisible(view == m_chatConsole);
 	m_stack->setCurrentWidget(view);
 	emit consoleSwitched(view == m_activityConsole);
 }
@@ -217,21 +219,39 @@ ChatPanel::ChatFilter ChatPanel::chatFilter() const {
 	return m_chatFilter;
 }
 
+QString ChatPanel::filterLabel(ChatFilter filter) const {
+	switch (filter) {
+		case ChatFilter::All:
+			return tr("&All");
+		case ChatFilter::SelectedChannel:
+			return tr("Selected &Channel");
+		case ChatFilter::Direct:
+			return tr("&Direct");
+	}
+	return QString();
+}
+
 void ChatPanel::setChatFilter(ChatFilter filter) {
-	if (filter == ChatFilter::SelectedChannel && !m_selectedChannelFilterButton->isEnabled()) {
-		// No tracked channel: the filter matches nothing; keep the current
-		// selection instead of stranding the view on an empty projection.
-		filter = ChatFilter::All;
+	if (filter == ChatFilter::SelectedChannel && !m_selectedChannelAvailable) {
+		// No tracked channel: the filter matches nothing. Keep the current
+		// selection and stay quiet - an unavailable filter is never silently
+		// swapped for another one (the dropdown option is disabled; this
+		// also guards programmatic calls). The presenter holds the same
+		// line.
+		m_filterActions[0]->setChecked(m_chatFilter == ChatFilter::All);
+		m_filterActions[1]->setChecked(m_chatFilter == ChatFilter::SelectedChannel);
+		m_filterActions[2]->setChecked(m_chatFilter == ChatFilter::Direct);
+		return;
 	}
 
 	const bool changed = m_chatFilter != filter;
 	m_chatFilter       = filter;
-	// Manual exclusivity, re-applied before the no-change early return
-	// (space-toggling the active button unchecks it first; see
-	// setActiveConsole for the same discipline on the tab row).
-	m_allFilterButton->setChecked(filter == ChatFilter::All);
-	m_selectedChannelFilterButton->setChecked(filter == ChatFilter::SelectedChannel);
-	m_directFilterButton->setChecked(filter == ChatFilter::Direct);
+	// Manual exclusivity in the menu, re-applied before the no-change early
+	// return (the same discipline as setActiveConsole on the tab row).
+	m_filterActions[0]->setChecked(filter == ChatFilter::All);
+	m_filterActions[1]->setChecked(filter == ChatFilter::SelectedChannel);
+	m_filterActions[2]->setChecked(filter == ChatFilter::Direct);
+	updateFilterButtonDisplay();
 	if (!changed) {
 		return;
 	}
@@ -239,29 +259,54 @@ void ChatPanel::setChatFilter(ChatFilter filter) {
 }
 
 void ChatPanel::setFilterBadge(ChatFilter filter, int count) {
-	applyBadge(filter == ChatFilter::All               ? m_allFilterButton
-			   : filter == ChatFilter::SelectedChannel ? m_selectedChannelFilterButton
-													   : m_directFilterButton,
-			   filter == ChatFilter::All               ? tr("&All")
-			   : filter == ChatFilter::SelectedChannel ? tr("Selected &Channel")
-													   : tr("&Direct"),
-			   count);
+	QAction *action    = filter == ChatFilter::All               ? m_filterActions[0]
+						 : filter == ChatFilter::SelectedChannel ? m_filterActions[1]
+																 : m_filterActions[2];
+	const QString base = filterLabel(filter);
+	QString text       = base;
+	if (count > 0) {
+		const QString shown = count > 99 ? QStringLiteral("99+") : QString::number(count);
+		// A menu item announces its text: the count must live in it (QAction
+		// has no separate accessible name), so spell the qualifier out. The
+		// mnemonic stays embedded for keyboard menu navigation.
+		text = tr("%1 (%2 unread)").arg(base, shown);
+	}
+	action->setText(text);
+}
+
+void ChatPanel::setFilterHiddenUnread(int count) {
+	m_filterHiddenUnread = count;
+	updateFilterButtonDisplay();
 }
 
 void ChatPanel::setSelectedChannelAvailable(bool available) {
-	m_selectedChannelFilterButton->setEnabled(available);
+	m_selectedChannelAvailable = available;
+	// The dropdown option stays visibly disabled while unavailable.
+	m_filterActions[1]->setEnabled(available);
 }
 
-QToolButton *ChatPanel::allFilterButton() const {
-	return m_allFilterButton;
+QToolButton *ChatPanel::filterButton() const {
+	return m_filterButton;
 }
 
-QToolButton *ChatPanel::selectedChannelFilterButton() const {
-	return m_selectedChannelFilterButton;
+QMenu *ChatPanel::filterMenu() const {
+	return m_filterMenu;
 }
 
-QToolButton *ChatPanel::directFilterButton() const {
-	return m_directFilterButton;
+void ChatPanel::updateFilterButtonDisplay() {
+	const QString base         = filterLabel(m_chatFilter);
+	const QString strippedBase = strippedMnemonic(base);
+	QString text               = base;
+	QString accessible         = strippedBase;
+	if (m_filterHiddenUnread > 0) {
+		const QString shown = m_filterHiddenUnread > 99 ? QStringLiteral("99+") : QString::number(m_filterHiddenUnread);
+		text                = tr("%1 (%2)").arg(base, shown);
+		// Announce the hidden-unread count explicitly (the tab-badge
+		// discipline); the description explains what the count means.
+		accessible = tr("%1 (%2 unread hidden)").arg(strippedBase, shown);
+	}
+	m_filterButton->setText(text);
+	m_filterButton->setAccessibleName(accessible);
 }
 
 void ChatPanel::setTargetDisplay(const QString &richText, const QString &toolTip) {
@@ -282,10 +327,8 @@ QLabel *ChatPanel::targetLabel() const {
 void ChatPanel::establishTabOrderAfter(QWidget *previous) {
 	QWidget::setTabOrder(previous, m_chatTabButton);
 	QWidget::setTabOrder(m_chatTabButton, m_activityTabButton);
-	QWidget::setTabOrder(m_activityTabButton, m_chatConsole);
+	QWidget::setTabOrder(m_activityTabButton, m_filterButton);
+	QWidget::setTabOrder(m_filterButton, m_chatConsole);
 	QWidget::setTabOrder(m_chatConsole, m_activityConsole);
-	QWidget::setTabOrder(m_activityConsole, m_allFilterButton);
-	QWidget::setTabOrder(m_allFilterButton, m_selectedChannelFilterButton);
-	QWidget::setTabOrder(m_selectedChannelFilterButton, m_directFilterButton);
-	QWidget::setTabOrder(m_directFilterButton, m_chatInput);
+	QWidget::setTabOrder(m_activityConsole, m_chatInput);
 }
