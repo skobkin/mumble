@@ -112,6 +112,12 @@ private slots:
 	// an earlier date inserts another one.
 	void dateSeparatorInsertedOnDateChange();
 
+	// A rebuild reproduces the live document's leading date separator
+	// exactly (kept when the live view had one - eviction across midnight
+	// leaves today's separator leading - and never invented when it did
+	// not), instead of re-deriving it from the current date.
+	void rebuildReproducesLiveLeadingDateSeparator();
+
 	// Entry frames carry the snapshotted margin.
 	void marginsAppliedFromSettings();
 
@@ -309,6 +315,70 @@ void TestLogPresentation::dateSeparatorInsertedOnDateChange() {
 	const QString plain     = view.document()->toPlainText();
 	QVERIFY(plain.contains(QString::fromLatin1("[Date changed to %1]").arg(yesterday)));
 	QVERIFY(plain.contains(QString::fromLatin1("[Date changed to %1]").arg(today)));
+}
+
+void TestLogPresentation::rebuildReproducesLiveLeadingDateSeparator() {
+	LogConsoleView view;
+	const QDateTime base = QDateTime::currentDateTime();
+
+	// Yesterday's entries followed by today's: the live view carries a
+	// leading separator for yesterday and a date-change separator for
+	// today.
+	view.appendEntry(at(base, -1, 1), QLatin1String("<p>old1</p>"), false, settings());
+	view.appendEntry(at(base, -1, 2), QLatin1String("<p>old2</p>"), false, settings());
+	view.appendEntry(at(base, 0, 3), QLatin1String("<p>new1</p>"), false, settings());
+	view.appendEntry(at(base, 0, 4), QLatin1String("<p>new2</p>"), false, settings());
+
+	// Eviction of the leading entries (what the chat store drives through
+	// removeLeadingRenderedEntries in lockstep): the obsolete [yesterday]
+	// separator goes with its entries, the [today] one stays and becomes
+	// leading.
+	QCOMPARE(view.removeLeadingRenderedEntries(2), 2);
+	const QString liveText = view.document()->toPlainText();
+	QVERIFY(!liveText.contains(QLatin1String("old1")));
+	QVERIFY(!liveText.contains(QLatin1String("old2")));
+	const auto leadingRole = [&view]() {
+		return view.document()->rootFrame()->childFrames().constFirst()->frameFormat().intProperty(
+			LogDocument::FrameRoleProperty);
+	};
+	QCOMPARE(leadingRole(), static_cast< int >(LogDocument::DateFrameRole));
+
+	// A rebuild from the same retained sources must reproduce the live
+	// document exactly - including the leading [today] separator (a
+	// clock-seeded rebuild re-derives the leading separator from the
+	// current date, which drops it and diverges from the live view).
+	const QVector< LogConsoleView::EntrySource > sources = {
+		{ at(base, 0, 3), QLatin1String("<p>new1</p>"), false, settings() },
+		{ at(base, 0, 4), QLatin1String("<p>new2</p>"), false, settings() }
+	};
+	view.rebuild(sources);
+	QCOMPARE(view.document()->toPlainText(), liveText);
+	QCOMPARE(leadingRole(), static_cast< int >(LogDocument::DateFrameRole));
+
+	// Rebuilding twice stays stable: no separator is lost or invented.
+	view.rebuild(sources);
+	QCOMPARE(view.document()->toPlainText(), liveText);
+
+	// The mirrored rule: when the live view has NO leading separator
+	// (all-today entries), a rebuild must not invent one either.
+	LogConsoleView view2;
+	view2.appendEntry(at(base, 0, 5), QLatin1String("<p>a</p>"), false, settings());
+	view2.appendEntry(at(base, 0, 6), QLatin1String("<p>b</p>"), false, settings());
+	view2.appendEntry(at(base, 0, 7), QLatin1String("<p>c</p>"), false, settings());
+	QCOMPARE(view2.removeLeadingRenderedEntries(1), 1);
+	const QString liveText2 = view2.document()->toPlainText();
+	QCOMPARE(view2.document()->rootFrame()->childFrames().constFirst()->frameFormat().intProperty(
+				 LogDocument::FrameRoleProperty),
+			 static_cast< int >(LogDocument::MessageFrameRole));
+	const QVector< LogConsoleView::EntrySource > sources2 = {
+		{ at(base, 0, 6), QLatin1String("<p>b</p>"), false, settings() },
+		{ at(base, 0, 7), QLatin1String("<p>c</p>"), false, settings() }
+	};
+	view2.rebuild(sources2);
+	QCOMPARE(view2.document()->toPlainText(), liveText2);
+	QCOMPARE(view2.document()->rootFrame()->childFrames().constFirst()->frameFormat().intProperty(
+				 LogDocument::FrameRoleProperty),
+			 static_cast< int >(LogDocument::MessageFrameRole));
 }
 
 void TestLogPresentation::marginsAppliedFromSettings() {

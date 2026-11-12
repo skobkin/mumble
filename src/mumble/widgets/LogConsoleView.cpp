@@ -33,6 +33,20 @@ bool LogConsoleView::isChatMessageType(Log::MsgType mt) {
 	return mt == Log::TextMessage || mt == Log::PrivateTextMessage;
 }
 
+bool LogConsoleView::hasLeadingDateFrame(const QTextDocument *doc) {
+	if (!doc) {
+		return false;
+	}
+	const QList< QTextFrame * > frames = doc->rootFrame()->childFrames();
+	return !frames.isEmpty()
+		   && frames.constFirst()->frameFormat().intProperty(LogDocument::FrameRoleProperty)
+				  == LogDocument::DateFrameRole;
+}
+
+QDate LogConsoleView::regeneratedSeedDate(bool leadingDateFrame, const QDate &oldestRetained) {
+	return leadingDateFrame ? oldestRetained.addDays(-1) : oldestRetained;
+}
+
 void LogConsoleView::appendEntry(const QDateTime &dt, const QString &console, bool ownMessage,
 								 const RenderSettings &settings) {
 	QTextCursor tc = textCursor();
@@ -211,14 +225,11 @@ void LogConsoleView::compact() {
 	LogDocument *old = qobject_cast< LogDocument * >(document());
 	if (old) {
 		// Preserve the reader's position across the swap (ratio-clamped).
-		QScrollBar *bar     = verticalScrollBar();
-		const qreal ratio   = bar->maximum() > 0 ? qreal(bar->value()) / qreal(bar->maximum()) : 1.0;
-		const int budget    = old->blockBudget();
-		const int keyBudget = old->resourceKeyBudget();
-		const bool leadingDateFrame =
-			!old->rootFrame()->childFrames().isEmpty()
-			&& old->rootFrame()->childFrames().constFirst()->frameFormat().intProperty(LogDocument::FrameRoleProperty)
-				   == LogDocument::DateFrameRole;
+		QScrollBar *bar                      = verticalScrollBar();
+		const qreal ratio                    = bar->maximum() > 0 ? qreal(bar->value()) / qreal(bar->maximum()) : 1.0;
+		const int budget                     = old->blockBudget();
+		const int keyBudget                  = old->resourceKeyBudget();
+		const bool leadingDateFrame          = hasLeadingDateFrame(old);
 		const QVector< EntrySource > sources = m_retainedSources;
 
 		LogDocument *fresh = new LogDocument(this);
@@ -230,16 +241,12 @@ void LogConsoleView::compact() {
 		connectDocument(fresh);
 		m_retainedSources.clear();
 
-		// Regenerate the leading separator state exactly as it was: a leading
-		// date frame is reproduced by seeding the date with the day before the
-		// oldest retained entry; a leading message frame by seeding with that
-		// entry's own date (no separator).
+		// Regenerate the leading separator state exactly as it was (the
+		// shared seeding rule, see regeneratedSeedDate).
 		if (sources.isEmpty()) {
 			m_lastEntryDate = QDate::currentDate();
-		} else if (leadingDateFrame) {
-			m_lastEntryDate = sources.constFirst().timestamp.date().addDays(-1);
 		} else {
-			m_lastEntryDate = sources.constFirst().timestamp.date();
+			m_lastEntryDate = regeneratedSeedDate(leadingDateFrame, sources.constFirst().timestamp.date());
 		}
 
 		for (const EntrySource &source : sources) {
@@ -272,13 +279,19 @@ void LogConsoleView::onEntriesTrimmed(int count) {
 }
 
 void LogConsoleView::rebuild(const QVector< EntrySource > &sources) {
-	// clearConsole() swaps in a fresh document (carrying over both budgets
-	// and the cached theme), resets the date state and reports the loss
-	// through entriesTrimmed; the re-appends then rebuild retained sources,
-	// separators and resources deterministically from the given sources -
-	// the same rendering path a live append takes, so nothing can diverge
-	// between a rebuilt and a live-rendered document.
+	// The leading-separator state of the document being replaced is part of
+	// the rendered history: a leading date frame says the oldest retained
+	// entry's date differs from an entry evicted before it, which is not
+	// derivable from the sources alone. Live eviction keeps that frame, so
+	// a rebuilt projection must reproduce it (and must not invent one when
+	// the live view has none) - the same seeding rule compact() uses keeps
+	// both paths content-identical instead of re-deriving the leading
+	// separator from the current date.
+	const bool leadingDateFrame = hasLeadingDateFrame(document());
 	clearConsole();
+	if (!sources.isEmpty()) {
+		m_lastEntryDate = regeneratedSeedDate(leadingDateFrame, sources.constFirst().timestamp.date());
+	}
 	for (const EntrySource &source : sources) {
 		appendEntry(source.timestamp, source.consoleHtml, source.ownMessage, source.settings);
 	}

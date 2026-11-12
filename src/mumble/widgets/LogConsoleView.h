@@ -88,9 +88,12 @@ public:
 	void compact();
 	/// Wholesale rebuild for filter projections: clears (fresh document, all
 	/// budgets and the theme carried over) and re-appends \p sources in
-	/// order. Date-separator state resets like a fresh view, so the first
-	/// source gets no leading separator. The view's retained-source list
-	/// becomes exactly \p sources.
+	/// order. The leading date-separator state is carried over from the
+	/// document being replaced (the same seeding rule compact() uses): a
+	/// leading separator is reproduced when the live view had one and not
+	/// invented when it did not, so a rebuilt projection stays
+	/// content-identical to the live-evicted view. The view's
+	/// retained-source list becomes exactly \p sources.
 	void rebuild(const QVector< EntrySource > &sources);
 	/// Removes the \p count oldest rendered entries (whole frames + their
 	/// date separators). The store-driven chat view uses this for lockstep
@@ -110,6 +113,15 @@ private slots:
 	void onEntriesTrimmed(int count);
 
 private:
+	/// Whether the document's first child frame is a date separator.
+	static bool hasLeadingDateFrame(const QTextDocument *doc);
+	/// The date-state seed for regenerating a document from retained
+	/// entries: a leading date frame is reproduced by seeding with the day
+	/// before the oldest retained entry's date; its absence by seeding with
+	/// that date itself (no leading separator). compact() and rebuild()
+	/// share this rule so both stay content-identical to the live view.
+	static QDate regeneratedSeedDate(bool leadingDateFrame, const QDate &oldestRetained);
+
 	void connectDocument(LogDocument *doc);
 
 	QVector< EntrySource > m_retainedSources;
