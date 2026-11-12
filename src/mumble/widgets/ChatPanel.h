@@ -9,6 +9,7 @@
 #include <QWidget>
 
 class ChatbarTextEdit;
+class QLabel;
 class LogConsoleView;
 class QStackedWidget;
 class QToolButton;
@@ -79,6 +80,14 @@ public:
 	QToolButton *selectedChannelFilterButton() const;
 	QToolButton *directFilterButton() const;
 
+	/// The composer's explicit destination label, above the input. Always
+	/// visible once it has content - regardless of the active tab and the
+	/// chat filter (the destination is a composer property, not a chat-view
+	/// projection property). Empty rich text hides it. Presentation only:
+	/// the label is never a routing input (sends re-resolve their target).
+	void setTargetDisplay(const QString &richText, const QString &toolTip);
+	QLabel *targetLabel() const;
+
 	/// Establishes the panel-internal keyboard chain after \p previous
 	/// (switch row -> chat view -> activity view -> filter row -> composer).
 	/// Views and rows hidden by the stack or the tab state are skipped
@@ -104,6 +113,7 @@ private:
 	QToolButton *m_selectedChannelFilterButton;
 	QToolButton *m_directFilterButton;
 	QWidget *m_filterRow;
+	QLabel *m_targetLabel;
 
 	void applyBadge(QToolButton *button, const QString &baseText, int count);
 

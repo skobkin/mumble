@@ -9,6 +9,7 @@
 #include "widgets/LogConsoleView.h"
 
 #include <QHBoxLayout>
+#include <QLabel>
 #include <QStackedWidget>
 #include <QStyle>
 #include <QToolButton>
@@ -98,12 +99,22 @@ ChatPanel::ChatPanel(LogConsoleView *chatConsole, LogConsoleView *activityConsol
 	filterLayout->addWidget(m_directFilterButton);
 	filterLayout->addStretch(1);
 
+	// The composer's explicit destination. Hidden until MainWindow hands it
+	// a target (setTargetDisplay); a label is not focusable, so it never
+	// enters the keyboard chain.
+	m_targetLabel = new QLabel(this);
+	m_targetLabel->setObjectName(QLatin1String("targetLabel"));
+	m_targetLabel->setTextFormat(Qt::RichText);
+	m_targetLabel->setTextInteractionFlags(Qt::NoTextInteraction);
+	m_targetLabel->hide();
+
 	QVBoxLayout *layout = new QVBoxLayout(this);
 	layout->setContentsMargins(0, 0, 0, 0);
 	layout->setSpacing(0);
 	layout->addWidget(switchRow, 0);
 	layout->addWidget(m_stack, 1);
 	layout->addWidget(m_filterRow, 0);
+	layout->addWidget(m_targetLabel, 0);
 	layout->addWidget(m_chatInput, 0);
 	// The filter row belongs to the chat projection (the initial tab), so
 	// it starts visible: setActiveConsole(chatConsole) is a no-op on the
@@ -251,6 +262,21 @@ QToolButton *ChatPanel::selectedChannelFilterButton() const {
 
 QToolButton *ChatPanel::directFilterButton() const {
 	return m_directFilterButton;
+}
+
+void ChatPanel::setTargetDisplay(const QString &richText, const QString &toolTip) {
+	if (richText.isEmpty()) {
+		m_targetLabel->clear();
+		m_targetLabel->hide();
+		return;
+	}
+	m_targetLabel->setText(richText);
+	m_targetLabel->setToolTip(toolTip);
+	m_targetLabel->show();
+}
+
+QLabel *ChatPanel::targetLabel() const {
+	return m_targetLabel;
 }
 
 void ChatPanel::establishTabOrderAfter(QWidget *previous) {

@@ -4435,6 +4435,33 @@ ChatTarget MainWindow::currentChatTarget() const {
 							 Global::get().s.bChatBarUseSelection);
 }
 
+void MainWindow::updateChatTargetPresentation(const ChatTarget &target) {
+	if (!target.isValid()) {
+		// Disconnected: the "Not connected" placeholder is the whole story.
+		m_shell->chatPanel()->setTargetDisplay(QString(), QString());
+		return;
+	}
+
+	const QString name = target.displayName().toHtmlEscaped();
+	if (target.kind == ChatTarget::Kind::User) {
+		QString toolTip;
+		if (target.viaListenerProxy) {
+			// The row is a channel listener, not the user's own channel:
+			// explain that the send addresses the user directly.
+			toolTip = tr("This row is a channel listener; the message is sent to the user directly.");
+		}
+		m_shell->chatPanel()->setTargetDisplay(tr("To user: <b>%1</b>").arg(name), toolTip);
+	} else {
+		// Channel: the full path as the tooltip when it differs from the
+		// bare name (nested channels).
+		QString toolTip;
+		if (target.channel && target.channel->getPath() != target.channel->qsName) {
+			toolTip = target.channel->getPath().toHtmlEscaped();
+		}
+		m_shell->chatPanel()->setTargetDisplay(tr("To channel: <b>%1</b>").arg(name), toolTip);
+	}
+}
+
 void MainWindow::updateChatBar() {
 	const ChatTarget target = currentChatTarget();
 
@@ -4452,6 +4479,7 @@ void MainWindow::updateChatBar() {
 			break;
 	}
 
+	updateChatTargetPresentation(target);
 	updateMenuPermissions();
 }
 

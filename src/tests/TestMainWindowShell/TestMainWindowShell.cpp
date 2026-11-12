@@ -21,6 +21,7 @@
 
 #include <QApplication>
 #include <QHBoxLayout>
+#include <QLabel>
 #include <QMainWindow>
 #include <QPointer>
 #include <QScrollBar>
@@ -92,6 +93,13 @@ private slots:
 	// programmatic selection while unavailable falls back to All; badges
 	// format into text and accessible names with the 99+ cap.
 	void chatFilterSelectionAndBadges();
+
+	// The composer's explicit destination label: hidden until it has
+	// content, visible across tab switches and filter states (the
+	// destination is a composer property, not a chat-view property), and
+	// never a keyboard stop (the consoles -> filters -> composer chain
+	// walks straight through it).
+	void targetLabelPresentation();
 
 	// Tab switches swap the stacked page only: documents, content and scroll
 	// positions of both views survive arbitrarily many switches.
@@ -724,6 +732,69 @@ void TestMainWindowShell::chatFilterSelectionAndBadges() {
 	panel->setFilterBadge(ChatPanel::ChatFilter::Direct, 0);
 	QVERIFY(!panel->directFilterButton()->text().contains(QLatin1String("(")));
 	QVERIFY(!panel->directFilterButton()->accessibleName().contains(QLatin1String("unread")));
+}
+
+void TestMainWindowShell::targetLabelPresentation() {
+	UserView *tree              = new UserView(nullptr);
+	LogConsoleView *log         = new LogConsoleView();
+	LogConsoleView *activityLog = new LogConsoleView();
+	ChatbarTextEdit *chat       = new ChatbarTextEdit();
+
+	MainWindowShell shell(tree, log, activityLog, chat);
+	shell.resize(400, 300);
+	shell.show();
+	drainEvents();
+
+	ChatPanel *panel = shell.chatPanel();
+	QLabel *label    = panel->targetLabel();
+	QVERIFY(label != nullptr);
+	QCOMPARE(label->objectName(), QLatin1String("targetLabel"));
+
+	// No content, no label: the composer speaks through its placeholder
+	// (and, once connected, MainWindow hands the target over).
+	QVERIFY(!label->isVisible());
+
+	// Content shows it; rich text and tooltip land verbatim.
+	panel->setTargetDisplay(QLatin1String("To channel: <b>Lounge</b>"), QLatin1String("/Root/Lounge"));
+	QVERIFY(label->isVisible());
+	QCOMPARE(label->text(), QLatin1String("To channel: <b>Lounge</b>"));
+	QCOMPARE(label->toolTip(), QLatin1String("/Root/Lounge"));
+
+	// The destination is a composer property, not a chat-view projection
+	// property: tab switches and filter changes never hide it.
+	panel->setActiveConsole(activityLog);
+	drainEvents();
+	QVERIFY(label->isVisible());
+	panel->setActiveConsole(log);
+	drainEvents();
+	panel->setSelectedChannelAvailable(false);
+	panel->setChatFilter(ChatPanel::ChatFilter::Direct);
+	drainEvents();
+	QVERIFY(label->isVisible());
+
+	// Empty rich text hides it again (disconnect).
+	panel->setTargetDisplay(QString(), QString());
+	QVERIFY(!label->isVisible());
+	QVERIFY(label->text().isEmpty());
+
+	// Not a keyboard stop: a label is not focusable, so the chain walks
+	// straight from the filter row into the composer.
+	QVERIFY(!(label->focusPolicy() & Qt::TabFocus));
+	// Re-enable the Selected Channel button (disabled further up) so the
+	// walk covers the full row.
+	panel->setSelectedChannelAvailable(true);
+	tree->setFocus();
+	drainEvents();
+	for (QWidget *expected :
+		 { static_cast< QWidget * >(panel->chatTabButton()), static_cast< QWidget * >(panel->activityTabButton()),
+		   static_cast< QWidget * >(log), static_cast< QWidget * >(panel->allFilterButton()),
+		   static_cast< QWidget * >(panel->selectedChannelFilterButton()),
+		   static_cast< QWidget * >(panel->directFilterButton()) }) {
+		QTest::keyClick(QApplication::focusWidget(), Qt::Key_Tab);
+		QCOMPARE(QApplication::focusWidget(), expected);
+	}
+	QTest::keyClick(QApplication::focusWidget(), Qt::Key_Tab);
+	QCOMPARE(QApplication::focusWidget(), static_cast< QWidget * >(chat));
 }
 
 void TestMainWindowShell::tabSwitchPreservesScroll() {

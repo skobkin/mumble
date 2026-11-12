@@ -299,6 +299,11 @@ public:
 	/// Resolves the composer's send target (placeholder, send routing and
 	/// enablement all go through this one decision table; see ChatTarget).
 	ChatTarget currentChatTarget() const;
+	/// Pushes the resolved target into the composer's destination label.
+	/// Called only from updateChatBar (the single trigger set), so the
+	/// label and the placeholder can never disagree. Presentation only -
+	/// the label is never a routing input.
+	void updateChatTargetPresentation(const ChatTarget &target);
 	void updateChatBar();
 	void openTextMessageDialog(ClientUser *p);
 	void openUserLocalNicknameDialog(const ClientUser &p);
