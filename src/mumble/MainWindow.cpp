@@ -901,7 +901,31 @@ void MainWindow::onChatFilterChanged(ChatPanel::ChatFilter filter) {
 }
 
 void MainWindow::onChatStreamStateChanged() {
+	// Badges first: they also refresh the Selected Channel button's
+	// availability, which the filter mirror below relies on (setChatFilter
+	// coerces Selected Channel to All while the button is disabled).
 	updateConsoleBadges();
+	if (!m_shell) {
+		return;
+	}
+	// The presenter can switch its filter autonomously (Selected Channel
+	// falls back to All when the tracked channel is removed or the
+	// connection drops): mirror it into the buttons so the checked state
+	// can never claim a projection that is not displayed - across
+	// disconnects, reconnects and reselections alike. Both sides ignore
+	// no-op updates (setChatFilter emits only on a change, and the
+	// presenter refuses no-op filter updates), so the mirror cannot loop.
+	switch (m_chatPresenter->filter()) {
+		case ChatStreamModel::Filter::All:
+			m_shell->chatPanel()->setChatFilter(ChatPanel::ChatFilter::All);
+			break;
+		case ChatStreamModel::Filter::SelectedChannel:
+			m_shell->chatPanel()->setChatFilter(ChatPanel::ChatFilter::SelectedChannel);
+			break;
+		case ChatStreamModel::Filter::Direct:
+			m_shell->chatPanel()->setChatFilter(ChatPanel::ChatFilter::Direct);
+			break;
+	}
 }
 
 void MainWindow::updateChatFilterSelection() {
