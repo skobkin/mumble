@@ -47,6 +47,21 @@ QDate LogConsoleView::regeneratedSeedDate(bool leadingDateFrame, const QDate &ol
 	return leadingDateFrame ? oldestRetained.addDays(-1) : oldestRetained;
 }
 
+void LogConsoleView::insertDateSeparator(QTextCursor &tc, int msgMargin, const QDate &date) {
+	QTextFrameFormat format;
+	format.setTopMargin(0);
+	format.setBottomMargin(msgMargin);
+	// Date-separator frames are tagged so the document's budget accounting
+	// can tell them apart from message frames.
+	format.setProperty(LogDocument::FrameRoleProperty, LogDocument::DateFrameRole);
+	tc.insertFrame(format);
+	// Log::tr keeps this string in the translation context it has always
+	// had, even though the rendering moved into this widget.
+	tc.insertHtml(
+		Log::tr("[Date changed to %1]\n").arg(QLocale().toString(date, QLocale::ShortFormat).toHtmlEscaped()));
+	tc.movePosition(QTextCursor::End);
+}
+
 void LogConsoleView::appendEntry(const QDateTime &dt, const QString &console, bool ownMessage,
 								 const RenderSettings &settings) {
 	QTextCursor tc = textCursor();
@@ -86,15 +101,7 @@ void LogConsoleView::appendEntry(const QDateTime &dt, const QString &console, bo
 
 	if (m_lastEntryDate != dt.date()) {
 		m_lastEntryDate = dt.date();
-		// Date-separator frames are tagged so the document's budget
-		// accounting can tell them apart from message frames.
-		qttf.setProperty(LogDocument::FrameRoleProperty, LogDocument::DateFrameRole);
-		tc.insertFrame(qttf);
-		// Log::tr keeps this string in the translation context it has always
-		// had, even though the rendering moved into this widget.
-		tc.insertHtml(Log::tr("[Date changed to %1]\n")
-						  .arg(QLocale().toString(m_lastEntryDate, QLocale::ShortFormat).toHtmlEscaped()));
-		tc.movePosition(QTextCursor::End);
+		insertDateSeparator(tc, msgMargin, m_lastEntryDate);
 		tc.setBlockFormat(bf);
 	}
 
@@ -301,8 +308,35 @@ int LogConsoleView::removeLeadingRenderedEntries(int count) {
 	if (count <= 0) {
 		return 0;
 	}
-	if (LogDocument *doc = qobject_cast< LogDocument * >(document())) {
-		return doc->removeLeadingEntries(count);
+	LogDocument *doc = qobject_cast< LogDocument * >(document());
+	if (!doc) {
+		return 0;
 	}
-	return 0;
+	const int removed = doc->removeLeadingEntries(count);
+
+	if (doc->entryCount() == 0) {
+		// Emptied: the next entry starts a fresh projection, and a rebuild
+		// of the same (still empty) store seeds the identical state, so
+		// both paths stay content-identical.
+		m_lastEntryDate = QDate();
+	} else if (!hasLeadingDateFrame(document()) && !m_retainedSources.isEmpty()) {
+		// Eviction consumed the oldest retained entry's same-date
+		// predecessors: re-insert the leading separator (the oldest
+		// retained entry's own render settings, exactly what its rebuild
+		// would emit) so the live document starts the way a rebuilt
+		// projection of the same sources starts.
+		const QDate oldest = m_retainedSources.constFirst().timestamp.date();
+		QTextCursor tc(document());
+		tc.movePosition(QTextCursor::Start);
+		insertDateSeparator(tc, m_retainedSources.constFirst().settings.messageMargins, oldest);
+		// The zero-height block discipline after the separator, matching
+		// appendEntry (the frame delimiters' spacer blocks).
+		QTextBlockFormat bf = tc.blockFormat();
+		bf.setLineHeight(0, QTextBlockFormat::FixedHeight);
+		bf.setTopMargin(0);
+		bf.setBottomMargin(0);
+		tc.setBlockFormat(bf);
+		m_lastEntryDate = oldest;
+	}
+	return removed;
 }

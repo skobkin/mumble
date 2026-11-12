@@ -312,9 +312,13 @@ public:
 	/// always kept (a single oversized entry may overshoot the budget).
 	void enforceBlockBudget();
 	/// Removes the \p count oldest complete entries (same frame and separator
-	/// discipline as enforceBlockBudget; emits entriesTrimmed with the number
-	/// of removed message entries). The store-driven chat view uses this to
-	/// keep its document in lockstep with the stream store's own eviction.
+	/// discipline as enforceBlockBudget, but UNLIKE the budget path it may
+	/// remove every rendered entry, the newest one included - the store
+	/// already evicted them, and keeping one would be a ghost). Date frames
+	/// left labeling nothing go with the last entry, so an emptied document
+	/// is left entirely empty. Emits entriesTrimmed with the number of
+	/// removed message entries. The store-driven chat view uses this to keep
+	/// its document in lockstep with the stream store's own eviction.
 	/// Returns the number of message entries actually removed.
 	int removeLeadingEntries(int count);
 	/// Overwrites the resource for \p name with the shared 1x1 placeholder
@@ -368,10 +372,13 @@ private:
 	/// Shared trimming core of enforceBlockBudget() and
 	/// removeLeadingEntries(): removes leading whole frames while \p shouldTrim
 	/// (called with the number of message entries removed so far) returns
-	/// true, always keeping the newest entry, then drops obsolete leading date
-	/// separators and emits entriesTrimmed. Returns the number of removed
-	/// message entries.
-	int trimInternal(const std::function< bool(int) > &shouldTrim);
+	/// true, then drops obsolete leading date separators and emits
+	/// entriesTrimmed. \p keepNewest is the budget- eviction guarantee: the
+	/// newest entry always survives (the pane is never blanked). A store-
+	/// driven removal passes false - it may take every rendered entry,
+	/// leaving the document empty. Returns the number of removed message
+	/// entries.
+	int trimInternal(const std::function< bool(int) > &shouldTrim, bool keepNewest);
 
 	int m_blockBudget           = 0;
 	int m_resourceKeyBudget     = 1024 * 1024;

@@ -96,8 +96,15 @@ public:
 	/// retained-source list becomes exactly \p sources.
 	void rebuild(const QVector< EntrySource > &sources);
 	/// Removes the \p count oldest rendered entries (whole frames + their
-	/// date separators). The store-driven chat view uses this for lockstep
-	/// eviction; returns the number of entries actually removed.
+	/// date separators). Unlike the block budget this may remove EVERY
+	/// rendered entry - the store-driven chat view uses it for lockstep
+	/// eviction, and the document must not keep a ghost the store already
+	/// evicted. Returns the number of entries actually removed. An emptied
+	/// view resets its date state; a non-empty one is left starting with a
+	/// date separator labeling its oldest retained entry's date
+	/// (re-inserted when eviction consumed a same-date predecessor), which
+	/// is what keeps the live view content-identical to a rebuilt
+	/// projection of the same sources.
 	int removeLeadingRenderedEntries(int count);
 
 signals:
@@ -118,9 +125,16 @@ private:
 	/// The date-state seed for regenerating a document from retained
 	/// entries: a leading date frame is reproduced by seeding with the day
 	/// before the oldest retained entry's date; its absence by seeding with
-	/// that date itself (no leading separator). compact() and rebuild()
-	/// share this rule so both stay content-identical to the live view.
+	/// that date itself (no leading separator). Used by compact(), which
+	/// re-renders the SAME content and must reproduce the live document
+	/// exactly. rebuild() deliberately does not use it - its projections
+	/// follow the deterministic sources-only rule instead.
 	static QDate regeneratedSeedDate(bool leadingDateFrame, const QDate &oldestRetained);
+	/// Inserts one date-separator frame + text at the cursor (the exact
+	/// rendering appendEntry uses on a date change). Shared with the
+	/// eviction path, which re-establishes the leading separator of the
+	/// deterministic projection rule.
+	void insertDateSeparator(QTextCursor &tc, int msgMargin, const QDate &date);
 
 	void connectDocument(LogDocument *doc);
 

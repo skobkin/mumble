@@ -113,10 +113,16 @@ private slots:
 	void dateSeparatorInsertedOnDateChange();
 
 	// A rebuild reproduces the live document's leading date separator
-	// exactly (kept when the live view had one - eviction across midnight
-	// leaves today's separator leading - and never invented when it did
-	// not), instead of re-deriving it from the current date.
+	// exactly: eviction leaves (or re-establishes) the separator the
+	// projection shows, and the rebuild keeps the view content-identical
+	// instead of re-deriving the leading state from the current date.
 	void rebuildReproducesLiveLeadingDateSeparator();
+
+	// Store-driven removal is exact: the return value equals the number of
+	// message entries removed across date separators, non-rendered
+	// evictions are no-ops, and removing every rendered entry empties the
+	// document completely.
+	void storeDrivenRemovalMatchesEvictedCount();
 
 	// Entry frames carry the snapshotted margin.
 	void marginsAppliedFromSettings();
@@ -321,6 +327,16 @@ void TestLogPresentation::rebuildReproducesLiveLeadingDateSeparator() {
 	LogConsoleView view;
 	const QDateTime base = QDateTime::currentDateTime();
 
+	// The leading frame's role tag (a DateFrameRole lead is the projection
+	// rule's leading separator).
+	const auto leadingRoleOf = [](LogConsoleView &v) {
+		return v.document()->rootFrame()->childFrames().constFirst()->frameFormat().intProperty(
+			LogDocument::FrameRoleProperty);
+	};
+	const auto hasLeadingSeparator = [&leadingRoleOf](LogConsoleView &v) {
+		return leadingRoleOf(v) == static_cast< int >(LogDocument::DateFrameRole);
+	};
+
 	// Yesterday's entries followed by today's: the live view carries a
 	// leading separator for yesterday and a date-change separator for
 	// today.
@@ -337,48 +353,80 @@ void TestLogPresentation::rebuildReproducesLiveLeadingDateSeparator() {
 	const QString liveText = view.document()->toPlainText();
 	QVERIFY(!liveText.contains(QLatin1String("old1")));
 	QVERIFY(!liveText.contains(QLatin1String("old2")));
-	const auto leadingRole = [&view]() {
-		return view.document()->rootFrame()->childFrames().constFirst()->frameFormat().intProperty(
-			LogDocument::FrameRoleProperty);
-	};
-	QCOMPARE(leadingRole(), static_cast< int >(LogDocument::DateFrameRole));
+	QVERIFY(hasLeadingSeparator(view));
 
 	// A rebuild from the same retained sources must reproduce the live
-	// document exactly - including the leading [today] separator (a
-	// clock-seeded rebuild re-derives the leading separator from the
-	// current date, which drops it and diverges from the live view).
+	// document exactly - including the leading [today] separator: the
+	// live view converged to it through the evictions, and the rebuild
+	// carries the replaced document's leading state over.
 	const QVector< LogConsoleView::EntrySource > sources = {
 		{ at(base, 0, 3), QLatin1String("<p>new1</p>"), false, settings() },
 		{ at(base, 0, 4), QLatin1String("<p>new2</p>"), false, settings() }
 	};
 	view.rebuild(sources);
 	QCOMPARE(view.document()->toPlainText(), liveText);
-	QCOMPARE(leadingRole(), static_cast< int >(LogDocument::DateFrameRole));
+	QVERIFY(hasLeadingSeparator(view));
 
 	// Rebuilding twice stays stable: no separator is lost or invented.
 	view.rebuild(sources);
 	QCOMPARE(view.document()->toPlainText(), liveText);
 
-	// The mirrored rule: when the live view has NO leading separator
-	// (all-today entries), a rebuild must not invent one either.
+	// The same-day convergence rule: all-today entries start WITHOUT a
+	// leading separator (the session inherits the construction date), but
+	// once eviction consumes the oldest entry's same-date predecessors, the
+	// live view re-inserts the leading separator - the shape a rebuild of
+	// the same sources reproduces.
 	LogConsoleView view2;
 	view2.appendEntry(at(base, 0, 5), QLatin1String("<p>a</p>"), false, settings());
 	view2.appendEntry(at(base, 0, 6), QLatin1String("<p>b</p>"), false, settings());
 	view2.appendEntry(at(base, 0, 7), QLatin1String("<p>c</p>"), false, settings());
+	QVERIFY(!hasLeadingSeparator(view2));
 	QCOMPARE(view2.removeLeadingRenderedEntries(1), 1);
 	const QString liveText2 = view2.document()->toPlainText();
-	QCOMPARE(view2.document()->rootFrame()->childFrames().constFirst()->frameFormat().intProperty(
-				 LogDocument::FrameRoleProperty),
-			 static_cast< int >(LogDocument::MessageFrameRole));
+	QVERIFY(hasLeadingSeparator(view2));
 	const QVector< LogConsoleView::EntrySource > sources2 = {
 		{ at(base, 0, 6), QLatin1String("<p>b</p>"), false, settings() },
 		{ at(base, 0, 7), QLatin1String("<p>c</p>"), false, settings() }
 	};
 	view2.rebuild(sources2);
 	QCOMPARE(view2.document()->toPlainText(), liveText2);
-	QCOMPARE(view2.document()->rootFrame()->childFrames().constFirst()->frameFormat().intProperty(
-				 LogDocument::FrameRoleProperty),
-			 static_cast< int >(LogDocument::MessageFrameRole));
+	QVERIFY(hasLeadingSeparator(view2));
+
+	// Removing every rendered entry empties the document completely (no
+	// ghost message, no orphan separator) and resets the date state: the
+	// next live append re-establishes the leading separator.
+	QCOMPARE(view2.removeLeadingRenderedEntries(2), 2);
+	QCOMPARE(view2.document()->rootFrame()->childFrames().count(), 0);
+	QCOMPARE(static_cast< LogDocument * >(view2.document())->entryCount(), 0);
+	view2.appendEntry(at(base, 0, 8), QLatin1String("<p>d</p>"), false, settings());
+	QCOMPARE(static_cast< LogDocument * >(view2.document())->entryCount(), 1);
+	QVERIFY(hasLeadingSeparator(view2));
+}
+
+void TestLogPresentation::storeDrivenRemovalMatchesEvictedCount() {
+	LogConsoleView view;
+	const QDateTime base = QDateTime::currentDateTime();
+
+	// Three entries over two dates (the middle one crosses midnight):
+	// [M1(today)][Date(tomorrow)][M2][M3].
+	view.appendEntry(at(base, 0, 1), QLatin1String("<p>e1</p>"), false, settings());
+	view.appendEntry(at(base, 1, 2), QLatin1String("<p>e2</p>"), false, settings());
+	view.appendEntry(at(base, 1, 3), QLatin1String("<p>e3</p>"), false, settings());
+	QCOMPARE(static_cast< LogDocument * >(view.document())->entryCount(), 3);
+
+	// Removing one message entry reports exactly one (a date separator
+	// frame that may go alongside never counts: e1 was appended same-day
+	// as the session seed, so its removal involves no separator at all).
+	QCOMPARE(view.removeLeadingRenderedEntries(1), 1);
+	QCOMPARE(static_cast< LogDocument * >(view.document())->entryCount(), 2);
+	QVERIFY(!view.document()->toPlainText().contains(QLatin1String("e1")));
+
+	// Asking for more than present removes what exists - exactly two.
+	QCOMPARE(view.removeLeadingRenderedEntries(5), 2);
+	QCOMPARE(static_cast< LogDocument * >(view.document())->entryCount(), 0);
+	QCOMPARE(view.document()->rootFrame()->childFrames().count(), 0);
+	// A removal on the emptied view is a no-op.
+	QCOMPARE(view.removeLeadingRenderedEntries(1), 0);
 }
 
 void TestLogPresentation::marginsAppliedFromSettings() {

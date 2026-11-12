@@ -153,6 +153,13 @@ private slots:
 	// view returns.
 	void backgroundRebuildsKeepUnseen();
 
+	// Lockstep eviction has no newest-entry floor: a non-matching append
+	// that evicts a RENDERED entry removes its frames too (no ghost), the
+	// removal count matches the evicted rendered ids exactly through
+	// repeated matching/non-matching rounds, an emptied view resets its
+	// date state, and a rebuild reproduces the live view exactly.
+	void evictedRenderedEntryLeavesNoGhost();
+
 private:
 	// LogConsoleView always owns a LogDocument (constructor, clearConsole,
 	// compact and rebuild all create one), so the cast cannot fail.
@@ -620,6 +627,56 @@ void TestChatStream::backgroundRebuildsKeepUnseen() {
 	QCOMPARE(presenter.chatTabBadge(), 1);
 	presenter.markDisplayed();
 	QCOMPARE(presenter.chatTabBadge(), 0);
+}
+
+void TestChatStream::evictedRenderedEntryLeavesNoGhost() {
+	LogConsoleView view;
+	ChatStreamModel store;
+	ChatStreamPresenter presenter(&view, &store);
+	presenter.setEntryCap(1);
+	presenter.setFilter(ChatStreamModel::Filter::Direct);
+
+	// A direct message renders under the active filter.
+	presenter.appendEntry(makeEntry(marker(1), atTime(1, 1), directRouting(11)), true);
+	QCOMPARE(docOf(view)->entryCount(), 1);
+	QVERIFY(view.document()->toPlainText().contains(marker(1)));
+
+	// THE GHOST REPRO: a non-matching channel append evicts the rendered
+	// direct from the store (cap 1). The document must not keep it - the
+	// removal is not the block budget, it has no newest-entry floor.
+	presenter.appendEntry(makeEntry(marker(2), atTime(1, 2), channelRouting(5)), true);
+	QCOMPARE(store.size(), 1);
+	QCOMPARE(docOf(view)->entryCount(), 0);
+	QCOMPARE(view.document()->rootFrame()->childFrames().count(), 0);
+	QVERIFY(!view.document()->toPlainText().contains(marker(1)));
+
+	// Repeated matching/non-matching evictions stay in exact lockstep.
+	for (int i = 0; i < 4; ++i) {
+		// Direct: evicts the non-rendered channel (no view work), renders.
+		presenter.appendEntry(makeEntry(marker(3 + 2 * i), atTime(1, 3 + 2 * i), directRouting(11)), true);
+		QCOMPARE(docOf(view)->entryCount(), 1);
+		// Channel: evicts the rendered direct (one frame removed), renders
+		// nothing.
+		presenter.appendEntry(makeEntry(marker(4 + 2 * i), atTime(1, 4 + 2 * i), channelRouting(5)), true);
+		QCOMPARE(store.size(), 1);
+		QCOMPARE(docOf(view)->entryCount(), 0);
+		QCOMPARE(view.document()->rootFrame()->childFrames().count(), 0);
+	}
+
+	// The emptied view reset its date state: the next render begins with
+	// the leading separator - the shape a rebuild of this single-entry
+	// store produces as well.
+	presenter.appendEntry(makeEntry(marker(11), atTime(1, 20), directRouting(11)), true);
+	QCOMPARE(docOf(view)->entryCount(), 1);
+	QCOMPARE(view.document()->rootFrame()->childFrames().constFirst()->frameFormat().intProperty(
+				 LogDocument::FrameRoleProperty),
+			 static_cast< int >(LogDocument::DateFrameRole));
+
+	// A rebuild from the store reproduces the live view exactly (no ghost,
+	// no missing separator).
+	const QString liveText = view.document()->toPlainText();
+	presenter.setEntryCap(1); // cap unchanged; exercises the rebuild path
+	QCOMPARE(view.document()->toPlainText(), liveText);
 }
 
 QTEST_MAIN(TestChatStream)

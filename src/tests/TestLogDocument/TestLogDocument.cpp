@@ -62,6 +62,12 @@ private slots:
 	// adds no duplicate separator; entryCount() never counts date frames.
 	void dateAwareEvictionCrossingMidnight();
 
+	// The store-driven removal (removeLeadingEntries) is distinct from the
+	// budget path: it may take EVERY rendered entry, the newest included,
+	// leaving the document (and any orphan date separator) completely
+	// gone. The budget eviction keeps its newest-entry guarantee.
+	void removeLeadingEntriesMayEmptyDocument();
+
 	// Stale resource-cache keys (URL strings Qt keeps forever) are bounded:
 	// past the key budget the view compacts into a fresh document with
 	// identical content.
@@ -440,6 +446,39 @@ void TestLogDocument::dateAwareEvictionCrossingMidnight() {
 	}
 	QVERIFY(view2.document()->toPlainText().contains(QLatin1String("a3")));
 	verifyRetainedMarkers(doc2, { QLatin1String("a3"), QLatin1String("b1") });
+}
+
+void TestLogDocument::removeLeadingEntriesMayEmptyDocument() {
+	LogConsoleView view;
+	appendMarked(view, QLatin1String("only"));
+	LogDocument *doc = docOf(view);
+	QCOMPARE(doc->entryCount(), 1);
+
+	// The store-driven removal is NOT the budget path: it must take the
+	// only rendered entry when asked (the store evicted it - keeping it in
+	// the document would be a ghost), leaving the document entirely empty.
+	QCOMPARE(doc->removeLeadingEntries(1), 1);
+	QCOMPARE(doc->entryCount(), 0);
+	QCOMPARE(doc->rootFrame()->childFrames().count(), 0);
+
+	// The budget path keeps its newest-entry guarantee.
+	appendMarked(view, QLatin1String("kept"));
+	QCOMPARE(doc->entryCount(), 1);
+	doc->setBlockBudget(1);
+	doc->enforceBlockBudget();
+	QCOMPARE(doc->entryCount(), 1);
+	QVERIFY(doc->toPlainText().contains(QLatin1String("kept")));
+
+	// With a leading date separator: removing the last message under it
+	// leaves no orphan separator behind either. The budget stays 1, so the
+	// append itself evicts "kept" and tomorrow remains under its separator.
+	view.appendEntry(QDateTime::currentDateTime().addDays(1), QLatin1String("<p>tomorrow</p>"), false,
+					 LogConsoleView::RenderSettings{ 3, true });
+	QCOMPARE(doc->entryCount(), 1); // the budget trimmed "kept"; tomorrow remains under its separator
+	QVERIFY(doc->toPlainText().contains(QLatin1String("tomorrow")));
+	QCOMPARE(doc->removeLeadingEntries(1), 1);
+	QCOMPARE(doc->entryCount(), 0);
+	QCOMPARE(doc->rootFrame()->childFrames().count(), 0);
 }
 
 void TestLogDocument::compactionPreservesContent() {

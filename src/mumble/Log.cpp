@@ -1101,14 +1101,16 @@ void LogDocument::enforceBlockBudget() {
 		return;
 	}
 	const int budget = m_blockBudget;
-	trimInternal([this, budget](int) { return totalBlockCount() > budget; });
+	trimInternal([this, budget](int) { return totalBlockCount() > budget; }, true);
 }
 
 int LogDocument::removeLeadingEntries(int count) {
-	return trimInternal([count](int removedSoFar) { return removedSoFar < count; });
+	// Store-driven lockstep eviction: the store already dropped these
+	// entries, so the document must not keep the newest one as a ghost.
+	return trimInternal([count](int removedSoFar) { return removedSoFar < count; }, false);
 }
 
-int LogDocument::trimInternal(const std::function< bool(int) > &shouldTrim) {
+int LogDocument::trimInternal(const std::function< bool(int) > &shouldTrim, bool keepNewest) {
 	int trimmedEntries = 0;
 
 	m_inInternalMutation = true;
@@ -1146,6 +1148,9 @@ int LogDocument::trimInternal(const std::function< bool(int) > &shouldTrim) {
 
 	while (shouldTrim(trimmedEntries)) {
 		const QList< QTextFrame * > frames = rootFrame()->childFrames();
+		if (frames.isEmpty()) {
+			break;
+		}
 
 		int messageCount = 0;
 		for (const QTextFrame *frame : frames) {
@@ -1154,10 +1159,12 @@ int LogDocument::trimInternal(const std::function< bool(int) > &shouldTrim) {
 			}
 		}
 
-		// Always keep the newest entry: a single oversized entry may overshoot
-		// the budget, but the pane is never blanked and formatting is never
-		// stripped mid-entry.
-		if (messageCount <= 1) {
+		// The budget-eviction guarantee: always keep the newest entry, so a
+		// single oversized entry may overshoot the budget but the pane is
+		// never blanked and formatting is never stripped mid-entry. A
+		// store-driven removal has no floor - the store evicted every entry
+		// it reports, and keeping one in the document would be a ghost.
+		if (keepNewest && messageCount <= 1) {
 			break;
 		}
 
@@ -1201,6 +1208,14 @@ int LogDocument::trimInternal(const std::function< bool(int) > &shouldTrim) {
 			break;
 		}
 		removeLeadingFrame(frames.at(0));
+	}
+
+	// A store-driven removal may have emptied the document; the last date
+	// frame left labeling nothing goes with the entries it separated (a
+	// budget trim always keeps the newest message, so this never fires
+	// there). The document is left entirely empty.
+	while (entryCount() == 0 && !rootFrame()->childFrames().isEmpty()) {
+		removeLeadingFrame(rootFrame()->childFrames().constFirst());
 	}
 
 	m_inInternalMutation = false;
